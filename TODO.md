@@ -1,4 +1,18 @@
-Current version: v0.2
+
+For v0.3:
+- [x] the outline of optics is till bulky and unattractive. Make it a thinner, more clean visual. See telescope simulator\pic of optic outline.png
+  [root cause: SELECTED_PEN was a non-cosmetic 1mm-wide pen that scaled with
+  canvas zoom, unlike GLASS_PEN's cosmetic width-0; made it cosmetic too.]
+- [x] Introduce a new functionality with a button in the "beam" tab inside "Beam at target location": Add functionality to automatically adjust the location of the optic immediately before the target location in order to minimise the divergence half-angle at the target location. This should assume that simple numeric optimisation techniques will be sufficient (i.e. the slope should not change sign between the current location at the desired optimum). have a field with the target precision in z axis location, with default at 10um. Name this feature "optimise lens for flatness". If this algorithm would step the lens out of its current order, leave it such that the two lenses are adjacent with 10um separation (including centre thickness), and display an error message. Do not crash the app.
+  [new telescope_simulator/physics/optimize.py, dependency-free golden-section
+  search; button lives in the Beam tab's target box, requires a *pinned*
+  target and is disabled (with a tooltip reason) when there's no eligible
+  optic, it's z-locked, or there's no feasible room -- see README.]
+- [x] introduce a second functionality similar to the one above, but this time the algorithm should adjust the previous lens to move the location of the next waist to the target z location. Call this "optimise lens for focus". AS above, if this would shift the lenses out of order, fail safely.
+  [shares the same search/eligibility machinery as "optimise lens for
+  flatness", just a different objective function.]
+
+Current version: v0.3
 
 TODO:
 - [fixed] in the view tab, changing the view parameters should automatically update the plot and not require an 'update' button
@@ -16,7 +30,8 @@ TODO:
   repositions it; see README "Round 2" notes — not pixel-confirmed live, so
   leave this item open until you've re-tested on the real display]
 
-All [fixed] items above were verified with automated tests (pytest + offscreen
-GUI smoke checks) and manual state inspection, but not eyeballed on a real
-display -- worth a quick visual pass before clearing this list. See README's
-"Lessons learned" Round 2/3 notes for what changed and why.
+The three [x] items above (v0.3) are confirmed fixed by the user on a real
+display. The [fixed] items below them were verified with automated tests and
+manual state inspection at the time, but not separately re-confirmed on a
+real display -- see README's "Lessons learned" Round 2/3/4 notes for what
+changed and why.

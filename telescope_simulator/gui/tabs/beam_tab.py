@@ -27,6 +27,9 @@ def _format_common(zr: float, q: complex, div: float, waist_z: float, waist_d: f
 
 class BeamTab(QtWidgets.QWidget):
     beamChanged = QtCore.Signal(object)  # InputBeamSpec
+    optimizeFlatnessRequested = QtCore.Signal()
+    optimizeFocusRequested = QtCore.Signal()
+    targetPrecisionChanged = QtCore.Signal(float)  # mm
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -146,6 +149,15 @@ class BeamTab(QtWidgets.QWidget):
         self._output_labels = labels
         return box
 
+    _FLATNESS_TOOLTIP = (
+        "Move the optic immediately before the target location to minimise the\n"
+        "beam's divergence there (make it as collimated/flat as possible)."
+    )
+    _FOCUS_TOOLTIP = (
+        "Move the optic immediately before the target location so the beam\n"
+        "comes to an actual focus (waist) exactly at the target location."
+    )
+
     def _build_target_box(self) -> QtWidgets.QWidget:
         box, labels = self._build_readout_group(
             "Beam at target location",
@@ -163,7 +175,56 @@ class BeamTab(QtWidgets.QWidget):
             ),
         )
         self._target_labels = labels
+        form = box.layout()
+
+        self.target_precision_spin = QtWidgets.QDoubleSpinBox()
+        self.target_precision_spin.setRange(0.1, 10000.0)
+        self.target_precision_spin.setDecimals(2)
+        self.target_precision_spin.setSuffix(" µm")
+        self.target_precision_spin.setValue(10.0)
+        self.target_precision_spin.setToolTip(
+            "Convergence tolerance -- and minimum lens-to-lens / lens-to-target\n"
+            "clearance if a search below has to be clamped -- shared by both\n"
+            "optimise buttons."
+        )
+        self.target_precision_spin.valueChanged.connect(self._on_target_precision_changed)
+        form.addRow("Target precision", self.target_precision_spin)
+
+        self.optimize_flatness_btn = QtWidgets.QPushButton("Optimise lens for flatness")
+        self.optimize_flatness_btn.clicked.connect(self._on_flatness_clicked)
+        self.optimize_focus_btn = QtWidgets.QPushButton("Optimise lens for focus")
+        self.optimize_focus_btn.clicked.connect(self._on_focus_clicked)
+
+        buttons_row = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(buttons_row)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self.optimize_flatness_btn)
+        row.addWidget(self.optimize_focus_btn)
+        form.addRow(buttons_row)
+
+        self.set_optimize_enabled(False, "Pin a target location on the canvas first (click, not just hover).")
         return box
+
+    # -- optimize buttons ----------------------------------------------------
+    def _on_flatness_clicked(self, *_args) -> None:
+        self.optimizeFlatnessRequested.emit()
+
+    def _on_focus_clicked(self, *_args) -> None:
+        self.optimizeFocusRequested.emit()
+
+    def _on_target_precision_changed(self, _value_um: float) -> None:
+        self.targetPrecisionChanged.emit(self.target_precision_mm())
+
+    def target_precision_mm(self) -> float:
+        return self.target_precision_spin.value() / 1000.0
+
+    def set_optimize_enabled(self, enabled: bool, disabled_reason: str = "") -> None:
+        """The two buttons always share eligibility (same governing optic),
+        so MainWindow toggles them together through this one entry point."""
+        self.optimize_flatness_btn.setEnabled(enabled)
+        self.optimize_focus_btn.setEnabled(enabled)
+        self.optimize_flatness_btn.setToolTip(self._FLATNESS_TOOLTIP if enabled else disabled_reason)
+        self.optimize_focus_btn.setToolTip(self._FOCUS_TOOLTIP if enabled else disabled_reason)
 
     # -- input form <-> model -------------------------------------------------
     def _on_collimated_toggled(self, checked: bool) -> None:

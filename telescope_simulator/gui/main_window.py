@@ -7,9 +7,15 @@ from pyqtgraph.Qt import QtWidgets
 from ..model.beam_spec import InputBeamSpec
 from ..model.config import SystemConfig
 from ..model.project import Project, default_demo_project
+from ..physics.optimize import (
+    OptimizeUnavailable,
+    find_governing_optic,
+    optimize_for_flatness,
+    optimize_for_focus,
+)
 from ..physics.system import OpticalSystem
 from .app_settings import AppSettings
-from .plot_view import PlotView
+from .plot_view import PlotView, TargetInfo
 from .tabs.beam_tab import BeamTab
 from .tabs.config_tab import ConfigTab
 from .tabs.optics_tab import OpticsTab
@@ -25,6 +31,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project: Project = default_demo_project()
         self.current_path: Optional[str] = None
         self.app_settings = AppSettings.load()
+        self._current_target: Optional[TargetInfo] = None
 
         self.plot_view = PlotView()
         self.beam_tab = BeamTab()
@@ -71,7 +78,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config_tab.resetViewRequested.connect(self.plot_view.apply_default_view)
         self.config_tab.viewRangeChanged.connect(self.plot_view.apply_default_view)
         self.config_tab.darkModeToggled.connect(self.on_dark_mode_toggled)
-        self.plot_view.targetChanged.connect(self.beam_tab.set_target_result)
+        self.plot_view.targetChanged.connect(self.on_target_changed)
+        self.beam_tab.optimizeFlatnessRequested.connect(self.on_optimize_flatness_clicked)
+        self.beam_tab.optimizeFocusRequested.connect(self.on_optimize_focus_clicked)
+        self.beam_tab.targetPrecisionChanged.connect(self.on_target_precision_changed)
 
     def _load_project_into_ui(self) -> None:
         self.beam_tab.set_beam(self.project.beam)
@@ -79,6 +89,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config_tab.set_config(self.project.config)
         self.plot_view.set_project(self.project)
         self._refresh_output_readouts()
+        self._current_target = None
+        self._recompute_optimize_eligibility()
 
     # -- canvas -> model --------------------------------------------------
     def on_optic_selected_from_canvas(self, optic_id: int) -> None:
@@ -112,6 +124,74 @@ class MainWindow(QtWidgets.QMainWindow):
         self.app_settings.dark_mode = enabled
         apply_theme(QtWidgets.QApplication.instance(), self.plot_view, enabled)
         self.app_settings.save()
+
+    # -- beam-at-target -> optimize buttons ------------------------------------
+    def on_target_changed(self, info: TargetInfo) -> None:
+        self.beam_tab.set_target_result(info)
+        # Only a *pinned* target is a stable enough basis for a model-mutating
+        # action -- a hover-tracked target changes on every mouse move, and
+        # PlotView only re-derives a pinned target after the optic moves (see
+        # PlotView.refresh()'s pinned-target block), so an unpinned target
+        # would leave this panel visibly stale right after a click.
+        self._current_target = info if info.pinned else None
+        self._recompute_optimize_eligibility()
+
+    def on_target_precision_changed(self, _precision_mm: float) -> None:
+        self._recompute_optimize_eligibility()
+
+    def _recompute_optimize_eligibility(self) -> None:
+        if self._current_target is None:
+            self.beam_tab.set_optimize_enabled(
+                False, "Pin a target location on the canvas first (click, not just hover)."
+            )
+            return
+        precision_mm = self.beam_tab.target_precision_mm()
+        governing, reason = find_governing_optic(
+            self.project.optics, self.project.beam.z_ref, self._current_target.z, precision_mm,
+        )
+        self.beam_tab.set_optimize_enabled(governing is not None, reason)
+
+    def on_optimize_flatness_clicked(self) -> None:
+        self._run_optimize(optimize_for_flatness, "flatness")
+
+    def on_optimize_focus_clicked(self) -> None:
+        self._run_optimize(optimize_for_focus, "focus")
+
+    def _run_optimize(self, optimize_fn, label: str) -> None:
+        if self._current_target is None:
+            return
+        precision_mm = self.beam_tab.target_precision_mm()
+        try:
+            result = optimize_fn(
+                self.project.beam, self.project.optics, self._current_target.z, precision_mm,
+            )
+        except OptimizeUnavailable as exc:
+            self.statusBar().showMessage(f"Optimise for {label}: {exc}")
+            self._recompute_optimize_eligibility()
+            return
+
+        optic = next((o for o in self.project.optics if o.id == result.optic_id), None)
+        if optic is None:
+            return
+        optic.z = result.z
+        # Union of what a canvas drag and an Optics-tab edit each already do
+        # individually (see on_optic_moved_from_canvas/on_optic_property_changed)
+        # -- this change originates in neither of those views, so both halves
+        # are needed: sync the Optics tab's form, and fully resync the canvas
+        # (which also re-derives the pinned target panel via refresh()).
+        self.optics_tab.update_optic_position(optic.id, optic.z, optic.x)
+        self.plot_view.refresh_optic(optic.id)
+        self._refresh_output_readouts()
+        self._recompute_optimize_eligibility()
+
+        if result.clamped:
+            self.statusBar().showMessage(
+                f"Optimise for {label}: '{optic.name}' hit the edge of its available "
+                f"travel and was clamped there to avoid crossing a neighboring lens "
+                f"or the target location."
+            )
+        else:
+            self.statusBar().showMessage(f"Optimise for {label}: done.")
 
     def _refresh_output_readouts(self) -> None:
         try:

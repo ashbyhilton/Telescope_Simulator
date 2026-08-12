@@ -49,7 +49,13 @@ class OpticItem(pg.GraphicsObject):
         # geometry after rapid drag/property updates.
         self.setCacheMode(QtWidgets.QGraphicsItem.CacheMode.NoCache)
         self.GLASS_PEN.setWidth(0)
-        self.SELECTED_PEN.setWidth(1)
+        # setWidth(1) here would be a *non-cosmetic* 1mm-wide pen -- it scales
+        # with the canvas's zoom transform, unlike GLASS_PEN's width-0 (Qt's
+        # cosmetic-hairline special case), so the selected outline rendered
+        # many pixels wide at typical zoom. setCosmetic keeps it a crisp,
+        # fixed on-screen width regardless of zoom, matching GLASS_PEN.
+        self.SELECTED_PEN.setWidthF(1.5)
+        self.SELECTED_PEN.setCosmetic(True)
         self.sync_from_optic()
 
     def sync_from_optic(self) -> None:

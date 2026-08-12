@@ -7,7 +7,7 @@ a guide for whoever (human or AI) picks up development next: why the tool is sha
 way it is, the physics it implements, how the code is organized, and the traps we
 already found and fixed.
 
-Current version: **v0.2** (see `TODO.md` for the active worklist).
+Current version: **v0.3** (see `TODO.md` for the active worklist).
 
 ## Quick start
 
@@ -158,6 +158,9 @@ telescope_simulator/
     matrices.py   # ABCD matrix builders
     beam.py       # GaussianBeam value object, transform_q()
     system.py     # OpticalSystem: chains beam + sorted optics -> SystemResult
+    optimize.py   # golden-section search for the "optimise lens for
+                   # flatness"/"...for focus" Beam-tab buttons; reuses
+                   # OpticalSystem.propagate(), never re-derives it
   model/          # plain dataclasses + JSON (de)serialization, no physics, no Qt
     optics.py     # Optic, OpticKind, make_default_optic() presets
     beam_spec.py  # InputBeamSpec
@@ -381,6 +384,47 @@ wasn't just "make the obviously-wrong thing work":
   `describe_shape()`, save/load, and old project files with other kind values) — only
   the "Add" combo's choices changed, consistent with "kind is just a starting shape,
   everything stays editable after."
+
+### Round 4 (v0.3): thinner outline, "optimise lens for flatness"/"...for focus"
+
+**Bulky selection outline**: `OpticItem.SELECTED_PEN.setWidth(1)` set a *non-cosmetic*
+1mm-wide pen — Qt scales a non-cosmetic pen's width by the painter's current transform,
+so at this app's typical zoom (tens of mm spanning a wide viewport) that 1mm stroke
+rendered as many device pixels wide, while `GLASS_PEN.setWidth(0)` stayed thin because
+Qt special-cases width 0 as an always-cosmetic hairline. Fixed by calling
+`SELECTED_PEN.setCosmetic(True)` too (with `setWidthF(1.5)` for a small, deliberate,
+zoom-independent bump over the hairline default). Lesson: any `QPen` used inside a
+zoomable/scaled `QGraphicsItem` should be explicitly cosmetic unless you specifically
+want its width to be a real length in data-space units.
+
+**"Optimise lens for flatness"/"optimise lens for focus"**: two buttons in the Beam
+tab's "Beam at target location" box, both moving *the optic immediately before the
+target location* (last optic in z-order whose back vertex is at or before the target
+z — this one filter also naturally excludes an optic the target sits inside, since its
+back vertex would then be *after* the target). "Flatness" minimizes the divergence
+half-angle of the beam segment covering the target; "focus" minimizes the distance
+between that segment's next waist and the target z. Both share one dependency-free
+golden-section search (`physics/optimize.golden_section_minimize`) over a feasible
+z-interval bounded by the neighboring optic *and* the target z itself (so the lens
+being optimized can never end up straddling or past the point it's supposed to be
+"before") — clamping to that boundary and reporting `OptimizeResult.clamped=True`
+rather than crossing it, per the feature's "fail safely, never crash" requirement.
+
+Two design choices worth knowing if you touch this:
+- **Both buttons require a *pinned* target**, not just hover-tracking. `PlotView`
+  only re-derives a pinned target's beam after a move (see `refresh()`'s
+  `_pinned`/`_pinned_z` block) — a hover-only target would leave the panel visibly
+  stale immediately after a click, since nothing re-runs on mouse-move once the click
+  handler returns. `MainWindow._current_target` is only set from a `TargetInfo` with
+  `pinned=True`; everything else (button enable/disable, the click handlers) reads
+  that, not `PlotView`'s live hover state.
+- **`MainWindow` owns the optimize-trigger logic, not `BeamTab`.** `BeamTab` only
+  exposes `optimizeFlatnessRequested`/`optimizeFocusRequested`/`targetPrecisionChanged`
+  signals and `set_optimize_enabled()`/`target_precision_mm()` — it never gets a
+  reference to `PlotView` or the optics list, per the signal-mediation convention
+  above. A successful move calls **both** `optics_tab.update_optic_position()` *and*
+  `plot_view.refresh_optic()` — the union of what a canvas drag and an Optics-tab edit
+  each do individually — since this change originates in neither of those views.
 
 ## Testing approach
 

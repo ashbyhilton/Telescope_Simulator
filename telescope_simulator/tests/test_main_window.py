@@ -44,3 +44,109 @@ def test_trailing_padding_change_applies_without_reset_view_click(qapp):
 
     (_, z_hi_after), _ = w.plot_view.getViewBox().viewRange()
     assert z_hi_after > z_hi_before + 1000.0
+
+
+def _pin_past_demo_lens(w, offset: float = 200.0):
+    optic = w.project.optics[0]
+    found = w.plot_view.beam_at(optic.z + optic.thickness_center + offset)
+    assert found is not None
+    beam, label, z = found
+    w.plot_view._pin_at(z, beam, label)
+    return z
+
+
+def test_optimize_buttons_start_disabled(qapp):
+    w = MainWindow()
+    assert not w.beam_tab.optimize_flatness_btn.isEnabled()
+    assert not w.beam_tab.optimize_focus_btn.isEnabled()
+    assert w.beam_tab.optimize_flatness_btn.toolTip()
+
+
+def test_pinning_target_past_lens_enables_optimize_buttons(qapp):
+    w = MainWindow()
+    _pin_past_demo_lens(w)
+    assert w.beam_tab.optimize_flatness_btn.isEnabled()
+    assert w.beam_tab.optimize_focus_btn.isEnabled()
+
+
+def test_optimize_focus_click_moves_optic_and_syncs_form(qapp):
+    w = MainWindow()
+    optic = w.project.optics[0]
+    original_z = optic.z
+    w.optics_tab.select_optic(optic.id)
+    _pin_past_demo_lens(w)
+
+    w.beam_tab.optimize_focus_btn.click()
+
+    assert optic.z != original_z
+    assert w.optics_tab.z_spin.value() == pytest.approx(optic.z, abs=1e-3)
+    assert w.plot_view._optic_items[optic.id].pos().x() == pytest.approx(optic.z, abs=1e-3)
+    assert "Optimise for focus" in w.statusBar().currentMessage()
+
+
+def test_optimize_flatness_click_moves_optic_without_raising(qapp):
+    w = MainWindow()
+    optic = w.project.optics[0]
+    original_z = optic.z
+    _pin_past_demo_lens(w)
+
+    w.beam_tab.optimize_flatness_btn.click()
+
+    assert optic.z != original_z
+    assert "Optimise for flatness" in w.statusBar().currentMessage()
+
+
+def test_locked_governing_optic_disables_buttons(qapp):
+    w = MainWindow()
+    w.project.optics[0].lock_z = True
+    _pin_past_demo_lens(w)
+
+    assert not w.beam_tab.optimize_flatness_btn.isEnabled()
+    assert "locked" in w.beam_tab.optimize_flatness_btn.toolTip()
+
+
+def test_tightening_precision_disables_buttons_on_infeasible_setup(qapp):
+    w = MainWindow()
+    optic = w.project.optics[0]
+    from telescope_simulator.model.optics import Optic
+
+    # A previous optic leaves only a small gap before the governing lens;
+    # the target sits just past the governing lens's own back vertex --
+    # comfortable room at the default 10um precision, but not at 1mm.
+    prev = Optic(name="Prev", diameter_full=25.4, thickness_center=1.0, z=optic.z - 1.5)
+    w.project.optics.append(prev)
+    w.optics_tab.set_optics(w.project.optics)
+    w.plot_view.set_project(w.project)
+
+    target_z = optic.z + optic.thickness_center + 0.05
+    found = w.plot_view.beam_at(target_z)
+    beam, label, z = found
+    w.plot_view._pin_at(z, beam, label)
+    assert w.beam_tab.optimize_flatness_btn.isEnabled()
+
+    w.beam_tab.target_precision_spin.setValue(1000.0)  # 1mm >> available room
+
+    assert not w.beam_tab.optimize_flatness_btn.isEnabled()
+    assert "No room" in w.beam_tab.optimize_flatness_btn.toolTip()
+
+
+def test_clamped_optimize_shows_status_message_without_crashing(qapp):
+    w = MainWindow()
+    optic = w.project.optics[0]
+    from telescope_simulator.model.optics import Optic
+
+    neighbor = Optic(name="Neighbor", diameter_full=25.4, thickness_center=1.0, z=optic.z + 5.0)
+    w.project.optics.append(neighbor)
+    w.optics_tab.set_optics(w.project.optics)
+    w.plot_view.set_project(w.project)
+
+    target_z = neighbor.z - 0.05  # in the tight gap right before the neighbor
+    found = w.plot_view.beam_at(target_z)
+    assert found is not None
+    beam, label, z = found
+    w.plot_view._pin_at(z, beam, label)
+
+    w.beam_tab.optimize_flatness_btn.click()
+
+    assert optic.z < neighbor.z
+    assert "Optimise for flatness" in w.statusBar().currentMessage()
