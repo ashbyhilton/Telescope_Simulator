@@ -8,10 +8,12 @@ from ..model.beam_spec import InputBeamSpec
 from ..model.config import SystemConfig
 from ..model.project import Project, default_demo_project
 from ..physics.system import OpticalSystem
+from .app_settings import AppSettings
 from .plot_view import PlotView
 from .tabs.beam_tab import BeamTab
 from .tabs.config_tab import ConfigTab
 from .tabs.optics_tab import OpticsTab
+from .theme import apply_theme
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -22,6 +24,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.project: Project = default_demo_project()
         self.current_path: Optional[str] = None
+        self.app_settings = AppSettings.load()
 
         self.plot_view = PlotView()
         self.beam_tab = BeamTab()
@@ -45,6 +48,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_menu()
         self._wire_signals()
         self._load_project_into_ui()
+        self.config_tab.set_dark_mode(self.app_settings.dark_mode)
+        apply_theme(QtWidgets.QApplication.instance(), self.plot_view, self.app_settings.dark_mode)
         self.statusBar().showMessage("Ready")
 
     # -- setup -----------------------------------------------------------
@@ -63,6 +68,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.optics_tab.selectionChanged.connect(self.plot_view.set_selected)
         self.beam_tab.beamChanged.connect(self.on_beam_changed)
         self.config_tab.configChanged.connect(self.on_config_changed)
+        self.config_tab.resetViewRequested.connect(self.plot_view.apply_default_view)
+        self.config_tab.darkModeToggled.connect(self.on_dark_mode_toggled)
+        self.plot_view.targetChanged.connect(self.beam_tab.set_target_result)
 
     def _load_project_into_ui(self) -> None:
         self.beam_tab.set_beam(self.project.beam)
@@ -96,8 +104,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_config_changed(self, config: SystemConfig) -> None:
         self.project.config = config
-        self.plot_view.getViewBox().setAspectLocked(config.equal_aspect)
+        self.plot_view.getViewBox().setAspectLocked(config.lock_aspect_ratio, ratio=config.aspect_ratio)
         self.plot_view.refresh()
+
+    def on_dark_mode_toggled(self, enabled: bool) -> None:
+        self.app_settings.dark_mode = enabled
+        apply_theme(QtWidgets.QApplication.instance(), self.plot_view, enabled)
+        self.app_settings.save()
 
     def _refresh_output_readouts(self) -> None:
         try:

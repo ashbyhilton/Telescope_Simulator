@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from telescope_simulator.physics.matrices import interface, propagation, thick_lens
 
@@ -39,3 +40,12 @@ def test_biconcave_defaults_are_diverging_in_thin_limit():
     m = thick_lens(thickness=1e-6, n_lens=n, r1=r1, r2=r2)
     power = -m[1, 0]  # 1/f
     assert power < 0
+
+
+def test_zero_radius_raises_instead_of_dividing_by_zero():
+    # A momentary R=0 (e.g. a GUI spin box mid-edit) must fail loudly and
+    # catchably rather than raising a raw ZeroDivisionError.
+    with pytest.raises(ValueError):
+        interface(1.0, 1.5, 0.0)
+    with pytest.raises(ValueError):
+        thick_lens(thickness=4.0, n_lens=1.5, r1=float("inf"), r2=0.0)

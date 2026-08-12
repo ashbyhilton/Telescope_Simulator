@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 @dataclass
@@ -12,7 +12,20 @@ class SystemConfig:
     beam_curve_points_per_segment: int = 200
     show_waist_markers: bool = True
     show_rayleigh_shading: bool = True
-    equal_aspect: bool = False
+
+    # View / aspect ratio (x-span / z-span). Locked by default at 0.3 so the
+    # transverse beam size stays readable against much larger z spans.
+    lock_aspect_ratio: bool = True
+    aspect_ratio: float = 0.3
+
+    # Default/reset view range. None means "auto" (derived from beam extent
+    # and the padding fields above), matching the pre-v0.2 behavior.
+    z_range_min: Optional[float] = None
+    z_range_max: Optional[float] = None
+    x_range_min: Optional[float] = None
+    x_range_max: Optional[float] = None
+
+    color_by_wavelength: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -22,7 +35,13 @@ class SystemConfig:
             "beam_curve_points_per_segment": self.beam_curve_points_per_segment,
             "show_waist_markers": self.show_waist_markers,
             "show_rayleigh_shading": self.show_rayleigh_shading,
-            "equal_aspect": self.equal_aspect,
+            "lock_aspect_ratio": self.lock_aspect_ratio,
+            "aspect_ratio": self.aspect_ratio,
+            "z_range_min": self.z_range_min,
+            "z_range_max": self.z_range_max,
+            "x_range_min": self.x_range_min,
+            "x_range_max": self.x_range_max,
+            "color_by_wavelength": self.color_by_wavelength,
         }
 
     @classmethod
@@ -34,5 +53,11 @@ class SystemConfig:
             beam_curve_points_per_segment=d.get("beam_curve_points_per_segment", 200),
             show_waist_markers=d.get("show_waist_markers", True),
             show_rayleigh_shading=d.get("show_rayleigh_shading", True),
-            equal_aspect=d.get("equal_aspect", False),
+            lock_aspect_ratio=d.get("lock_aspect_ratio", True),
+            aspect_ratio=d.get("aspect_ratio", 0.3),
+            z_range_min=d.get("z_range_min"),
+            z_range_max=d.get("z_range_max"),
+            x_range_min=d.get("x_range_min"),
+            x_range_max=d.get("x_range_max"),
+            color_by_wavelength=d.get("color_by_wavelength", False),
         )

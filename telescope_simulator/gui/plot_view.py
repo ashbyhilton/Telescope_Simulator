@@ -1,49 +1,79 @@
 """The central interactive x-z canvas: beam envelope, optic silhouettes,
-waist/Rayleigh annotations, native pan/zoom (from pg.ViewBox), and
-click/drag selection of optics."""
+waist/Rayleigh annotations, native pan/zoom (from pg.ViewBox), click/drag
+selection of optics, and cursor/pinned beam-target tracking."""
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore
 
 from ..model.project import Project
+from ..physics.beam import GaussianBeam
 from ..physics.system import OpticalSystem, SystemResult
+from .color_utils import wavelength_to_rgb
+from .mm_axis import MMAxisItem
 from .optic_item import OpticItem
+
+DEFAULT_BEAM_RGB = (80, 140, 200)
+
+
+@dataclass
+class TargetInfo:
+    z: float
+    beam: GaussianBeam
+    label: str
+    pinned: bool
 
 
 class PlotView(pg.PlotWidget):
     opticSelected = QtCore.Signal(int)  # optic id, or -1 for deselect
     opticMoved = QtCore.Signal(int, float, float)  # id, z, x
+    targetChanged = QtCore.Signal(object)  # TargetInfo
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        super().__init__(
+            parent,
+            axisItems={
+                "bottom": MMAxisItem(orientation="bottom", base_text="z"),
+                "left": MMAxisItem(orientation="left", base_text="x"),
+            },
+        )
         self.showGrid(x=True, y=True, alpha=0.2)
-        self.setLabel("bottom", "z", units="mm")
-        self.setLabel("left", "x", units="mm")
-        self.getViewBox().setAspectLocked(False)
+        self.getViewBox().disableAutoRange()
 
-        self._beam_upper = self.plot(pen=pg.mkPen((80, 140, 200), width=2))
-        self._beam_lower = self.plot(pen=pg.mkPen((80, 140, 200), width=2))
+        self._beam_upper = self.plot(pen=pg.mkPen(DEFAULT_BEAM_RGB, width=2))
+        self._beam_lower = self.plot(pen=pg.mkPen(DEFAULT_BEAM_RGB, width=2))
         self._beam_fill = pg.FillBetweenItem(self._beam_upper, self._beam_lower, brush=pg.mkBrush(80, 140, 200, 60))
         self.addItem(self._beam_fill)
         self._axis_line = self.plot(pen=pg.mkPen((120, 120, 120), width=1, style=QtCore.Qt.PenStyle.DashLine))
         self._waist_markers = pg.ScatterPlotItem(size=9, brush=pg.mkBrush(230, 60, 60, 220), pen=None)
         self.addItem(self._waist_markers)
+        self._target_marker: Optional[pg.ScatterPlotItem] = None
 
         self._optic_items: Dict[int, OpticItem] = {}
         self._rayleigh_regions: List[pg.LinearRegionItem] = []
         self._selected_id: Optional[int] = None
         self.project: Optional[Project] = None
 
+        self._last_result: Optional[SystemResult] = None
+        self._plotted_z_range: Optional[Tuple[float, float]] = None
+        self._plotted_w_abs_max: float = 1.0
+        self._pinned = False
+
+        self.scene().sigMouseMoved.connect(self._on_scene_mouse_moved)
+        self.scene().sigMouseClicked.connect(self._on_scene_mouse_clicked)
+
     # -- project wiring -----------------------------------------------
     def set_project(self, project: Project) -> None:
         self.project = project
-        self.getViewBox().setAspectLocked(project.config.equal_aspect)
+        self._unpin()
+        self.getViewBox().setAspectLocked(project.config.lock_aspect_ratio, ratio=project.config.aspect_ratio)
         self._sync_optic_items()
         self.refresh()
+        self.apply_default_view()
 
     def _sync_optic_items(self) -> None:
         if self.project is None:
@@ -75,7 +105,7 @@ class PlotView(pg.PlotWidget):
         for oid, item in self._optic_items.items():
             item.set_selected(oid == self._selected_id)
 
-    # -- interaction ----------------------------------------------------
+    # -- interaction: optics ----------------------------------------------
     def _on_item_clicked(self, item: OpticItem) -> None:
         self.set_selected(item.optic.id)
         self.opticSelected.emit(item.optic.id)
@@ -87,6 +117,85 @@ class PlotView(pg.PlotWidget):
         self.opticMoved.emit(item.optic.id, new_z, new_x)
         self.refresh()
 
+    # -- interaction: cursor / pinned target location ----------------------
+    def _on_scene_mouse_moved(self, scene_pos) -> None:
+        if self._pinned or self.project is None:
+            return
+        vb = self.getViewBox()
+        if not vb.sceneBoundingRect().contains(scene_pos):
+            return
+        view_pos = vb.mapSceneToView(scene_pos)
+        found = self.beam_at(view_pos.x())
+        if found is None:
+            return
+        beam, label, z = found
+        self.targetChanged.emit(TargetInfo(z=z, beam=beam, label=label, pinned=False))
+
+    def _on_scene_mouse_clicked(self, ev) -> None:
+        if ev.isAccepted() or self._pinned or self.project is None:
+            return
+        vb = self.getViewBox()
+        scene_pos = ev.scenePos()
+        if not vb.sceneBoundingRect().contains(scene_pos):
+            return
+        view_pos = vb.mapSceneToView(scene_pos)
+        found = self.beam_at(view_pos.x())
+        if found is None:
+            return
+        beam, label, z = found
+        self._pin_at(z, beam, label)
+
+    def _pin_at(self, z: float, beam: GaussianBeam, label: str) -> None:
+        self._pinned = True
+        if self._target_marker is None:
+            self._target_marker = pg.ScatterPlotItem(
+                size=13, symbol="d", brush=pg.mkBrush(60, 200, 90, 230), pen=pg.mkPen((20, 90, 40), width=1)
+            )
+            self._target_marker.sigClicked.connect(self._on_marker_clicked)
+            self.addItem(self._target_marker)
+        self._target_marker.setData([z], [0.0])
+        self.targetChanged.emit(TargetInfo(z=z, beam=beam, label=label, pinned=True))
+
+    def _on_marker_clicked(self, *_args) -> None:
+        self._unpin()
+
+    def _unpin(self) -> None:
+        self._pinned = False
+        if self._target_marker is not None:
+            self._target_marker.setData([], [])
+
+    def beam_at(self, z: float) -> Optional[Tuple[GaussianBeam, str, float]]:
+        """Returns (beam, segment label, clamped z) for whichever segment
+        covers `z`, clamped to the currently plotted z-range."""
+        if self._last_result is None or self._plotted_z_range is None:
+            return None
+        z_lo, z_hi = self._plotted_z_range
+        z = min(max(z, z_lo), z_hi)
+        for seg in self._last_result.segments:
+            if seg.z_start - 1e-9 <= z <= seg.z_end + 1e-9:
+                return seg.beam, seg.label, z
+        return None
+
+    # -- default / reset view -------------------------------------------
+    def apply_default_view(self) -> None:
+        if self.project is None or self._plotted_z_range is None:
+            return
+        cfg = self.project.config
+        z_lo = cfg.z_range_min if cfg.z_range_min is not None else self._plotted_z_range[0]
+        z_hi = cfg.z_range_max if cfg.z_range_max is not None else self._plotted_z_range[1]
+        z_span = max(z_hi - z_lo, 1e-9)
+
+        if cfg.x_range_min is not None and cfg.x_range_max is not None:
+            x_lo, x_hi = cfg.x_range_min, cfg.x_range_max
+        elif cfg.lock_aspect_ratio:
+            half_x = 0.5 * z_span * cfg.aspect_ratio
+            x_lo, x_hi = -half_x, half_x
+        else:
+            half_x = self._plotted_w_abs_max * 1.15
+            x_lo, x_hi = -half_x, half_x
+
+        self.setRange(xRange=(z_lo, z_hi), yRange=(x_lo, x_hi), padding=0)
+
     # -- rendering --------------------------------------------------------
     def refresh(self) -> None:
         if self.project is None:
@@ -96,19 +205,36 @@ class PlotView(pg.PlotWidget):
             result = OpticalSystem(self.project.beam, self.project.optics).propagate(trailing_length=trailing)
         except ValueError:
             return
+        self._last_result = result
 
         z_all, w_all = self._sample_result(result)
+        self._plotted_z_range = (float(z_all[0]), float(z_all[-1]))
+        self._plotted_w_abs_max = float(np.max(w_all)) if len(w_all) else 1.0
+
+        cfg = self.project.config
+        rgb = wavelength_to_rgb(self.project.beam.wavelength_nm) if cfg.color_by_wavelength else DEFAULT_BEAM_RGB
+        pen = pg.mkPen(rgb, width=2)
+        self._beam_upper.setPen(pen)
+        self._beam_lower.setPen(pen)
+        self._beam_fill.setBrush(pg.mkBrush(rgb[0], rgb[1], rgb[2], 60))
+
         self._beam_upper.setData(z_all, w_all)
         self._beam_lower.setData(z_all, -w_all)
         self._axis_line.setData([z_all[0], z_all[-1]], [0.0, 0.0])
 
         waists = self._find_waists(result)
-        cfg = self.project.config
         if cfg.show_waist_markers and waists:
             self._waist_markers.setData([z for z, _ in waists], [0.0] * len(waists))
         else:
             self._waist_markers.setData([], [])
         self._update_rayleigh_shading(waists if cfg.show_rayleigh_shading else [])
+
+        # Force a full repaint rather than relying on Qt's dirty-region
+        # tracking: item bounding rects can shrink/move sharply when a
+        # property edit changes an optic's geometry, and on some platforms
+        # partial-update compositing has left stale pixels behind in
+        # exactly that situation.
+        self.viewport().update()
 
     def _trailing_length(self) -> float:
         cfg = self.project.config

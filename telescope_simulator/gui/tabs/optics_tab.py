@@ -11,6 +11,7 @@ from typing import List, Optional
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from ...model.optics import Optic, OpticKind, make_default_optic
+from ...physics.matrices import thick_lens
 
 
 class OpticsTab(QtWidgets.QWidget):
@@ -92,6 +93,8 @@ class OpticsTab(QtWidgets.QWidget):
         form.addRow("Center thickness", self.thickness_spin)
         form.addRow("Front ROC (R1)", self._wrap(self.r1_spin, self.r1_flat_check))
         form.addRow("Back ROC (R2)", self._wrap(self.r2_spin, self.r2_flat_check))
+        self.efl_label = QtWidgets.QLabel("-")
+        form.addRow("Effective focal length", self.efl_label)
         form.addRow("Refractive index", self.n_spin)
         form.addRow("z position", self.z_spin)
         form.addRow("x position", self.x_spin)
@@ -101,9 +104,10 @@ class OpticsTab(QtWidgets.QWidget):
         for w in (self.diameter_spin, self.thickness_spin, self.r1_spin, self.r2_spin,
                   self.n_spin, self.z_spin, self.x_spin, self.angle_spin):
             w.valueChanged.connect(self._on_form_value_changed)
-        for c in (self.r1_flat_check, self.r2_flat_check, self.lock_z_check,
-                  self.lock_x_check, self.lock_angle_check):
+        for c in (self.lock_z_check, self.lock_x_check, self.lock_angle_check):
             c.toggled.connect(self._on_form_value_changed)
+        self.r1_flat_check.toggled.connect(self._on_r1_flat_toggled)
+        self.r2_flat_check.toggled.connect(self._on_r2_flat_toggled)
 
         return box
 
@@ -200,6 +204,7 @@ class OpticsTab(QtWidgets.QWidget):
     def _load_optic_into_form(self, optic: Optional[Optic]) -> None:
         if optic is None:
             self._set_form_enabled(False)
+            self.efl_label.setText("-")
             return
         self._set_form_enabled(True)
         self._updating_form = True
@@ -221,6 +226,31 @@ class OpticsTab(QtWidgets.QWidget):
         self.lock_x_check.setChecked(optic.lock_x)
         self.lock_angle_check.setChecked(optic.lock_angle)
         self._updating_form = False
+        self._update_efl_label(optic)
+
+    def _update_efl_label(self, optic: Optic) -> None:
+        try:
+            m = thick_lens(optic.thickness_center, optic.n, optic.r1, optic.r2)
+        except (ValueError, ZeroDivisionError):
+            self.efl_label.setText("-")
+            return
+        power = -m[1, 0]
+        if abs(power) < 1e-12:
+            self.efl_label.setText("∞ (afocal)")
+        else:
+            self.efl_label.setText(f"{1.0 / power:.4g} mm")
+
+    def _on_r1_flat_toggled(self, checked: bool) -> None:
+        self.r1_spin.setEnabled(not checked)
+        if not checked and self.r1_spin.value() == 0.0:
+            self.r1_spin.setValue(100.0)
+        self._on_form_value_changed()
+
+    def _on_r2_flat_toggled(self, checked: bool) -> None:
+        self.r2_spin.setEnabled(not checked)
+        if not checked and self.r2_spin.value() == 0.0:
+            self.r2_spin.setValue(100.0)
+        self._on_form_value_changed()
 
     def _on_form_value_changed(self, *_args) -> None:
         if self._updating_form or self._selected_id is None:
@@ -241,6 +271,7 @@ class OpticsTab(QtWidgets.QWidget):
         optic.lock_z = self.lock_z_check.isChecked()
         optic.lock_x = self.lock_x_check.isChecked()
         optic.lock_angle = self.lock_angle_check.isChecked()
+        self._update_efl_label(optic)
         self.opticPropertyChanged.emit(optic.id)
 
     def _on_add_clicked(self) -> None:

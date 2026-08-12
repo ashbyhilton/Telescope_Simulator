@@ -45,7 +45,7 @@ class OpticItem(pg.GraphicsObject):
         self._press_data_pos = None
         self.setAcceptedMouseButtons(QtCore.Qt.MouseButton.LeftButton)
         self.GLASS_PEN.setWidth(0)
-        self.SELECTED_PEN.setWidth(2)
+        self.SELECTED_PEN.setWidth(1)
         self.sync_from_optic()
 
     def sync_from_optic(self) -> None:

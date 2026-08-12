@@ -28,6 +28,8 @@ def interface(n1: float, n2: float, radius: float) -> Matrix:
     """Refraction at a spherical interface going from index n1 into n2."""
     if np.isinf(radius):
         power = 0.0
+    elif radius == 0.0:
+        raise ValueError("radius of curvature cannot be exactly zero (a point has no defined curvature)")
     else:
         power = (n1 - n2) / (n2 * radius)
     return np.array([[1.0, 0.0], [power, n1 / n2]])
