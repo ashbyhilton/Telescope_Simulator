@@ -11,6 +11,13 @@ class ConfigTab(QtWidgets.QWidget):
     configChanged = QtCore.Signal(object)  # SystemConfig
     resetViewRequested = QtCore.Signal()
     darkModeToggled = QtCore.Signal(bool)
+    # Fired (in addition to configChanged) only by fields that define the
+    # plotted z/x range itself (View box, plus the beam-curve padding
+    # fields) -- so the canvas snaps to the new range immediately instead of
+    # requiring a manual "Reset View" click, without every unrelated Config
+    # toggle (annotations, color-by-wavelength, ...) also fighting a user's
+    # manual pan/zoom.
+    viewRangeChanged = QtCore.Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -62,9 +69,9 @@ class ConfigTab(QtWidgets.QWidget):
         form.addRow(self.reset_view_btn)
 
         for w in (self.aspect_ratio_spin, self.z_min_spin, self.z_max_spin, self.x_min_spin, self.x_max_spin):
-            w.valueChanged.connect(self._on_changed)
+            w.valueChanged.connect(self._on_view_range_changed)
         for c in (self.lock_aspect_check, self.auto_z_check, self.auto_x_check):
-            c.toggled.connect(self._on_changed)
+            c.toggled.connect(self._on_view_range_changed)
 
         return box
 
@@ -88,8 +95,9 @@ class ConfigTab(QtWidgets.QWidget):
         form.addRow("Beam curve points per segment", self.resolution_spin)
         form.addRow(self.color_by_wavelength_check)
 
-        for w in (self.leading_pad_spin, self.trailing_mult_spin, self.trailing_min_spin, self.resolution_spin):
-            w.valueChanged.connect(self._on_changed)
+        for w in (self.leading_pad_spin, self.trailing_mult_spin, self.trailing_min_spin):
+            w.valueChanged.connect(self._on_view_range_changed)
+        self.resolution_spin.valueChanged.connect(self._on_changed)
         self.color_by_wavelength_check.toggled.connect(self._on_changed)
 
         return box
@@ -134,6 +142,11 @@ class ConfigTab(QtWidgets.QWidget):
         return w
 
     # -- state sync ----------------------------------------------------------
+    def _on_view_range_changed(self, *_args) -> None:
+        self._on_changed()
+        if not self._updating:
+            self.viewRangeChanged.emit()
+
     def _on_changed(self, *_args) -> None:
         if self._updating:
             return

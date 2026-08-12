@@ -11,16 +11,17 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 from ...model.beam_spec import InputBeamSpec
 from ...physics.beam import GaussianBeam
 from ...physics.system import SystemResult
+from ..mm_axis import format_length_mm
 
 
 def _format_common(zr: float, q: complex, div: float, waist_z: float, waist_d: float) -> Dict[str, str]:
     deg = div * 180.0 / math.pi
     return {
-        "zr": f"{zr:.4g} mm",
+        "zr": format_length_mm(zr),
         "q": f"{q.real:.4g} + {q.imag:.4g}i  mm",
         "div": f"{div * 1e3:.4g} mrad ({deg:.4g}°)",
-        "waist_z": f"{waist_z:.4g} mm",
-        "waist_d": f"{waist_d:.4g} mm",
+        "waist_z": format_length_mm(waist_z),
+        "waist_d": format_length_mm(waist_d),
     }
 
 
@@ -213,7 +214,7 @@ class BeamTab(QtWidgets.QWidget):
         )
         for key, text in values.items():
             self._output_labels[key].setText(text)
-        self._output_labels["diam_at_zr"].setText(f"{result.diameter_one_zr_past_last_optic:.4g} mm")
+        self._output_labels["diam_at_zr"].setText(format_length_mm(result.diameter_one_zr_past_last_optic))
 
     def show_error(self, message: str) -> None:
         self.error_label.setText(message)
@@ -223,10 +224,10 @@ class BeamTab(QtWidgets.QWidget):
         labels = self._target_labels
         labels["status"].setText("Pinned" if info.pinned else "Tracking cursor")
         labels["element"].setText(info.label)
-        labels["z"].setText(f"{info.z:.4g} mm")
-        labels["diam"].setText(f"{2.0 * info.beam.w(info.z):.4g} mm")
+        labels["z"].setText(format_length_mm(info.z))
+        labels["diam"].setText(format_length_mm(2.0 * info.beam.w(info.z)))
         roc = info.beam.radius_of_curvature(info.z)
-        labels["roc"].setText("∞ (flat)" if math.isinf(roc) else f"{roc:.4g} mm")
+        labels["roc"].setText("∞ (flat)" if math.isinf(roc) else format_length_mm(roc))
         common = _format_common(
             info.beam.rayleigh_range, info.beam.q_at(info.z), info.beam.divergence_half_angle,
             info.beam.z_waist, 2.0 * info.beam.w0,

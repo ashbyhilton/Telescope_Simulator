@@ -1,0 +1,75 @@
+{
+  "beam": {
+    "wavelength_nm": 556.0,
+    "z_ref": 0.0,
+    "w_ref": 2.5,
+    "collimated": true,
+    "r_ref": null,
+    "x_offset": 0.0
+  },
+  "optics": [
+    {
+      "id": 1,
+      "name": "L1",
+      "kind": "biconvex",
+      "diameter_full": 12.7,
+      "thickness_center": 4.0,
+      "r1": 10.3,
+      "r2": Infinity,
+      "n": 1.5168,
+      "z": 25.0,
+      "x": 0.0,
+      "angle_deg": 0.0,
+      "lock_z": false,
+      "lock_x": true,
+      "lock_angle": true
+    },
+    {
+      "id": 2,
+      "name": "L2",
+      "kind": "plano-convex",
+      "diameter_full": 12.7,
+      "thickness_center": 4.0,
+      "r1": Infinity,
+      "r2": -10.3,
+      "n": 1.5168,
+      "z": 67.94134271681139,
+      "x": 0.0,
+      "angle_deg": 0.0,
+      "lock_z": false,
+      "lock_x": true,
+      "lock_angle": true
+    },
+    {
+      "id": 4,
+      "name": "L12",
+      "kind": "plano-concave",
+      "diameter_full": 12.7,
+      "thickness_center": 3.0,
+      "r1": -15.4,
+      "r2": Infinity,
+      "n": 1.5168,
+      "z": 37.50352036018412,
+      "x": 0.0,
+      "angle_deg": 0.0,
+      "lock_z": false,
+      "lock_x": true,
+      "lock_angle": true
+    }
+  ],
+  "config": {
+    "plot_leading_padding_mm": 20.0,
+    "plot_trailing_padding_zr_multiple": 3.0,
+    "plot_trailing_padding_min_mm": 100.0,
+    "beam_curve_points_per_segment": 200,
+    "show_waist_markers": true,
+    "show_rayleigh_shading": false,
+    "lock_aspect_ratio": true,
+    "aspect_ratio": 0.3,
+    "z_range_min": 0.0,
+    "z_range_max": 100.0,
+    "x_range_min": null,
+    "x_range_max": null,
+    "color_by_wavelength": true
+  }
+}

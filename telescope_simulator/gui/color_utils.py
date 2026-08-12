@@ -4,20 +4,14 @@ from __future__ import annotations
 
 from typing import Tuple
 
-PALE_PINK = (255, 182, 193)  # displayed for wavelengths beyond the visible red edge (>700nm)
-VIOLET = (148, 0, 211)  # displayed for wavelengths beyond the visible violet edge (<400nm)
-
 
 def wavelength_to_rgb(wavelength_nm: float, gamma: float = 0.8) -> Tuple[int, int, int]:
     """Approximate RGB color for a visible-light wavelength (piecewise linear
-    in each color band, per the well-known Dan Bruton algorithm), with two
-    explicit out-of-band cases: pale pink above 700nm, violet below 400nm."""
-    if wavelength_nm > 700:
-        return PALE_PINK
-    if wavelength_nm < 400:
-        return VIOLET
-
-    wl = float(wavelength_nm)
+    in each color band, per the well-known Dan Bruton algorithm). Wavelengths
+    outside the visible band clamp to the color at the nearest edge (400nm or
+    700nm) rather than switching to an unrelated named color -- an IR/UV beam
+    is drawn in the same color as the visible edge it's just past."""
+    wl = float(min(max(wavelength_nm, 400.0), 700.0))
     if wl < 440:
         r, g, b = -(wl - 440) / (440 - 400), 0.0, 1.0
     elif wl < 490:

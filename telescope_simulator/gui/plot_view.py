@@ -62,6 +62,7 @@ class PlotView(pg.PlotWidget):
         self._plotted_z_range: Optional[Tuple[float, float]] = None
         self._plotted_w_abs_max: float = 1.0
         self._pinned = False
+        self._pinned_z: Optional[float] = None
 
         self.scene().sigMouseMoved.connect(self._on_scene_mouse_moved)
         self.scene().sigMouseClicked.connect(self._on_scene_mouse_clicked)
@@ -113,7 +114,7 @@ class PlotView(pg.PlotWidget):
     def _on_item_dragged(self, item: OpticItem, new_z: float, new_x: float) -> None:
         item.optic.z = new_z
         item.optic.x = new_x
-        item.sync_from_optic()
+        item.set_position(new_z, new_x)
         self.opticMoved.emit(item.optic.id, new_z, new_x)
         self.refresh()
 
@@ -147,13 +148,15 @@ class PlotView(pg.PlotWidget):
 
     def _pin_at(self, z: float, beam: GaussianBeam, label: str) -> None:
         self._pinned = True
+        self._pinned_z = z
         if self._target_marker is None:
             self._target_marker = pg.ScatterPlotItem(
                 size=13, symbol="d", brush=pg.mkBrush(60, 200, 90, 230), pen=pg.mkPen((20, 90, 40), width=1)
             )
             self._target_marker.sigClicked.connect(self._on_marker_clicked)
             self.addItem(self._target_marker)
-        self._target_marker.setData([z], [0.0])
+        x_offset = self.project.beam.x_offset if self.project is not None else 0.0
+        self._target_marker.setData([z], [x_offset])
         self.targetChanged.emit(TargetInfo(z=z, beam=beam, label=label, pinned=True))
 
     def _on_marker_clicked(self, *_args) -> None:
@@ -161,6 +164,7 @@ class PlotView(pg.PlotWidget):
 
     def _unpin(self) -> None:
         self._pinned = False
+        self._pinned_z = None
         if self._target_marker is not None:
             self._target_marker.setData([], [])
 
@@ -185,14 +189,15 @@ class PlotView(pg.PlotWidget):
         z_hi = cfg.z_range_max if cfg.z_range_max is not None else self._plotted_z_range[1]
         z_span = max(z_hi - z_lo, 1e-9)
 
+        x_offset = self.project.beam.x_offset
         if cfg.x_range_min is not None and cfg.x_range_max is not None:
             x_lo, x_hi = cfg.x_range_min, cfg.x_range_max
         elif cfg.lock_aspect_ratio:
             half_x = 0.5 * z_span * cfg.aspect_ratio
-            x_lo, x_hi = -half_x, half_x
+            x_lo, x_hi = x_offset - half_x, x_offset + half_x
         else:
             half_x = self._plotted_w_abs_max * 1.15
-            x_lo, x_hi = -half_x, half_x
+            x_lo, x_hi = x_offset - half_x, x_offset + half_x
 
         self.setRange(xRange=(z_lo, z_hi), yRange=(x_lo, x_hi), padding=0)
 
@@ -218,22 +223,41 @@ class PlotView(pg.PlotWidget):
         self._beam_lower.setPen(pen)
         self._beam_fill.setBrush(pg.mkBrush(rgb[0], rgb[1], rgb[2], 60))
 
-        self._beam_upper.setData(z_all, w_all)
-        self._beam_lower.setData(z_all, -w_all)
-        self._axis_line.setData([z_all[0], z_all[-1]], [0.0, 0.0])
+        # x_offset shifts the whole beam envelope's transverse center; the
+        # physics only ever tracks a scalar radius w(z), not a real 2D
+        # transverse position (matching how an Optic's own decenter is
+        # rendering-only too -- see README's documented v1 simplifications),
+        # so this is a constant, uniform shift applied at render time only.
+        x_offset = self.project.beam.x_offset
+        self._beam_upper.setData(z_all, w_all + x_offset)
+        self._beam_lower.setData(z_all, -w_all + x_offset)
+        self._axis_line.setData([z_all[0], z_all[-1]], [x_offset, x_offset])
 
         waists = self._find_waists(result)
         if cfg.show_waist_markers and waists:
-            self._waist_markers.setData([z for z, _ in waists], [0.0] * len(waists))
+            self._waist_markers.setData([z for z, _ in waists], [x_offset] * len(waists))
         else:
             self._waist_markers.setData([], [])
         self._update_rayleigh_shading(waists if cfg.show_rayleigh_shading else [])
+
+        if self._pinned and self._pinned_z is not None:
+            # A pinned target snapshots a specific GaussianBeam at pin time;
+            # re-derive it against the just-recomputed result so the "beam at
+            # target location" panel doesn't go stale after an optic is
+            # edited or dragged out from under the pin.
+            found = self.beam_at(self._pinned_z)
+            if found is not None:
+                beam, label, z = found
+                self.targetChanged.emit(TargetInfo(z=z, beam=beam, label=label, pinned=True))
 
         # Force a full repaint rather than relying on Qt's dirty-region
         # tracking: item bounding rects can shrink/move sharply when a
         # property edit changes an optic's geometry, and on some platforms
         # partial-update compositing has left stale pixels behind in
-        # exactly that situation.
+        # exactly that situation. Invalidate both the scene's own dirty
+        # tracking and the viewport, since either layer caching state could
+        # independently be the one holding a stale region.
+        self.scene().update()
         self.viewport().update()
 
     def _trailing_length(self) -> float:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict
@@ -44,8 +45,8 @@ class Optic:
     x: float = 0.0  # mm, transverse decenter
     angle_deg: float = 0.0  # tilt of the optic normal relative to +z (cosmetic in v1)
     lock_z: bool = False
-    lock_x: bool = False
-    lock_angle: bool = False
+    lock_x: bool = True
+    lock_angle: bool = True
     id: int = field(default_factory=lambda: next(_id_counter))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -94,3 +95,26 @@ def make_default_optic(kind: OpticKind, name: str, z: float = 0.0) -> Optic:
     afterwards."""
     defaults = _KIND_DEFAULTS[kind]
     return Optic(name=name, kind=kind, z=z, **defaults)
+
+
+def describe_shape(r1: float, r2: float) -> str:
+    """Human-readable lens shape derived from *live* r1/r2, using the same
+    sign convention as `_KIND_DEFAULTS` (R > 0 if the surface's center of
+    curvature lies on the +z side of its vertex). `Optic.kind` is only a
+    write-once creation preset and is never recomputed as r1/r2 are edited,
+    so this is the only reliable "what shape is this *right now*" readout."""
+    front_flat = math.isinf(r1)
+    back_flat = math.isinf(r2)
+    if front_flat and back_flat:
+        return "Plano-plano (flat window)"
+    front_convex = (not front_flat) and r1 > 0
+    back_convex = (not back_flat) and r2 < 0
+    if front_flat:
+        return "Plano-convex" if back_convex else "Plano-concave"
+    if back_flat:
+        return "Plano-convex" if front_convex else "Plano-concave"
+    if front_convex and back_convex:
+        return "Biconvex"
+    if not front_convex and not back_convex:
+        return "Biconcave"
+    return "Meniscus"

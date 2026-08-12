@@ -1,14 +1,16 @@
-from telescope_simulator.gui.color_utils import PALE_PINK, VIOLET, wavelength_to_rgb
+from telescope_simulator.gui.color_utils import wavelength_to_rgb
 
 
-def test_infrared_is_pale_pink():
-    assert wavelength_to_rgb(701.0) == PALE_PINK
-    assert wavelength_to_rgb(1064.0) == PALE_PINK
+def test_infrared_clamps_to_red_edge_color():
+    edge = wavelength_to_rgb(700.0)
+    assert wavelength_to_rgb(701.0) == edge
+    assert wavelength_to_rgb(1064.0) == edge
 
 
-def test_ultraviolet_is_violet():
-    assert wavelength_to_rgb(399.0) == VIOLET
-    assert wavelength_to_rgb(266.0) == VIOLET
+def test_ultraviolet_clamps_to_violet_edge_color():
+    edge = wavelength_to_rgb(400.0)
+    assert wavelength_to_rgb(399.0) == edge
+    assert wavelength_to_rgb(266.0) == edge
 
 
 def test_green_band_is_green_dominant():

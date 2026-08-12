@@ -10,7 +10,7 @@ import math
 
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore, QtGui
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from ..model.optics import Optic
 
@@ -44,16 +44,33 @@ class OpticItem(pg.GraphicsObject):
         self._press_optic_zx = None
         self._press_data_pos = None
         self.setAcceptedMouseButtons(QtCore.Qt.MouseButton.LeftButton)
+        # Explicit, not relying on Qt's default: rules out any pixmap-cache
+        # layer (device- or item-coordinate) as a source of stale-looking
+        # geometry after rapid drag/property updates.
+        self.setCacheMode(QtWidgets.QGraphicsItem.CacheMode.NoCache)
         self.GLASS_PEN.setWidth(0)
         self.SELECTED_PEN.setWidth(1)
         self.sync_from_optic()
 
     def sync_from_optic(self) -> None:
+        """Full resync: rebuilds the surface polygon from the optic's
+        current shape fields, then repositions/rotates it. Call this after
+        any edit that could change shape (diameter/thickness/r1/r2), not on
+        every drag mouse-move — see `set_position()`."""
         self.prepareGeometryChange()
         self._build_polygon()
         self.setPos(self.optic.z, self.optic.x)
         self.setRotation(self.optic.angle_deg)
         self.update()
+
+    def set_position(self, z: float, x: float) -> None:
+        """Position-only update for drag moves: the optic's shape fields
+        aren't touched by dragging, so this skips `prepareGeometryChange()`
+        and the polygon rebuild `sync_from_optic()` does on every call --
+        Qt's own item-move handling already invalidates the old/new scene
+        regions for a plain `setPos()`, without needing to also declare a
+        (here, unchanged) geometry change on every mouse-move."""
+        self.setPos(z, x)
 
     def _build_polygon(self, n_samples: int = 48) -> None:
         optic = self.optic

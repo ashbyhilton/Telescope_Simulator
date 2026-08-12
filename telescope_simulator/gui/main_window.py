@@ -69,6 +69,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.beam_tab.beamChanged.connect(self.on_beam_changed)
         self.config_tab.configChanged.connect(self.on_config_changed)
         self.config_tab.resetViewRequested.connect(self.plot_view.apply_default_view)
+        self.config_tab.viewRangeChanged.connect(self.plot_view.apply_default_view)
         self.config_tab.darkModeToggled.connect(self.on_dark_mode_toggled)
         self.plot_view.targetChanged.connect(self.beam_tab.set_target_result)
 

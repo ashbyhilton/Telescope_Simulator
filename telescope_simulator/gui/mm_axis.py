@@ -28,6 +28,16 @@ def _unit_for_span(span_mm: float) -> Tuple[str, float]:
     return _UNIT_BANDS[-1][1], _UNIT_BANDS[-1][2]
 
 
+def format_length_mm(value_mm: float, sig_figs: int = 4) -> str:
+    """Format a single length (stored internally in mm) using the same
+    um/mm/m/km unit selection as the plot axes, so a readout like the beam
+    characteristics panels doesn't show raw millimeters in scientific
+    notation (e.g. "3.5e4 mm") for large/small values."""
+    unit, factor = _unit_for_span(value_mm)
+    converted = value_mm * factor
+    return f"{converted:.{sig_figs}g} {unit}"
+
+
 class MMAxisItem(pg.AxisItem):
     def __init__(self, *args, base_text: str = "", **kwargs):
         self._base_text = base_text

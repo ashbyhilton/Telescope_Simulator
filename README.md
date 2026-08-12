@@ -110,7 +110,23 @@ independent of thickness — you don't need separate thin-lens vs. thick-lens fo
 by reusing the *exact same* tested function used for beam propagation, rather than
 re-deriving a thick-lens lensmaker formula. **Prefer this pattern**: if you need a new
 derived optical quantity, check whether it's already sitting inside the ABCD matrix
-before writing new algebra.
+before writing new algebra — back focal length (`optics_tab.py`'s BFL readout) is the
+same matrix's `-A/C`, no separate formula needed either.
+
+**UI-level R2 sign flip, physics core unaffected**: `Optic.r1`/`Optic.r2` (the model,
+save format, and everything in `physics/`) always use the convention above — center of
+curvature on the +z side of the vertex is positive — which means the *same* numeric sign
+means convex for a front surface but concave for a back surface. Users found this
+confusing (R2 in a saved project doesn't read as "convex/concave" the way R1 does), so
+`optics_tab.py`'s **Back ROC (R2) spinbox displays and accepts the negated value** —
+positive always reads as convex, negative as concave, for both R1 and R2, from the form.
+The flip happens only at that one widget's read/write boundary
+(`_load_optic_into_form`/`_on_form_value_changed`); `Optic.r2`, `to_dict`/`from_dict`,
+`describe_shape()`, `thick_lens()`, and `OpticItem`'s rendering all still use the
+original physics-space value, so existing saved project files (e.g. `test_config.json`)
+load with unchanged meaning. If you add another place that reads/writes `r2` for
+display, remember to flip it there too, or route it through `optics_tab.py` instead of
+touching `Optic.r2` directly.
 
 ### Validation strategy
 
@@ -287,20 +303,99 @@ display too. As defense in depth, `PlotView.refresh()` now also forces a full
 `viewport().update()` rather than relying on Qt's dirty-region tracking, to reduce the
 chance of any *other* not-yet-found partial-update artifact.
 
+### Round 2: stale kind label, a second 0-radius entry point, drag repaint artifact
+
+Manual testing after v0.2 turned up three more issues; the first two have a confirmed
+root cause and fix, the third is best-effort/unconfirmed.
+
+**Stale shape label**: `Optic.kind` (`model/optics.py`) is a write-once creation preset
+consumed only by `make_default_optic()` when a new optic is added — nothing ever
+recomputes it from a hand-edited `r1`/`r2`, and the Optics tab's kind combo box only
+ever affects the *next* "Add", never the selected optic. So an optic created as
+"Plano-Concave 2" and then hand-edited to a different shape keeps displaying its
+original (now wrong) kind, with no UI indication anything is stale. Fixed by adding
+`model.optics.describe_shape(r1, r2)`, a pure function deriving the *current* shape name
+straight from live R1/R2 using the same sign convention as `_KIND_DEFAULTS`, displayed
+as a new read-only "Shape (from R1/R2)" row in the Optics tab (same pattern as the EFL
+label) — `kind` itself is intentionally left alone as a creation-time preset field, not
+"fixed" to auto-update, since nothing else in the codebase needs it to track live
+geometry.
+
+**A second way to write `r1`/`r2 = 0.0`**: the original fix only repaired the spin box
+when its "Flat" checkbox was *toggled*. Typing `0` directly into an enabled ROC spin box
+(Flat left unchecked) bypassed that repair entirely, silently writing a literal `0.0`
+into the shared `Optic` — no crash (the `ValueError`/try-except from the original fix
+still catches it downstream), but `OpticalSystem.propagate()` then raises on that optic,
+and `PlotView.refresh()` silently returns on `ValueError`, freezing the beam curve with
+no visible error. Fixed by moving the same "if unchecked and value is exactly 0.0, snap
+to 100.0" repair into `_on_form_value_changed()` itself, so it applies regardless of
+which widget's signal triggered the call — not just the checkbox's `toggled` signal.
+
+**Drag-triggered doubled/offset outline**: a user reported (with a screenshot) a lens
+rendering with what looked like a stale outline offset from its fill, appearing after
+dragging the lens on the canvas. Two independent code reviews found no live logic defect
+that could cause it: `OpticItem.paint()` draws fill and outline from the same polygon in
+one `drawPolygon()` call (they cannot desync from each other within one item), and
+`PlotView` never creates a second `OpticItem` for one optic id. The one drag-specific
+thing found: `_on_item_dragged()` called the *full* `sync_from_optic()` — including
+`prepareGeometryChange()` and a polygon rebuild — on every mouse-move, even though a
+drag only changes position, never shape. `OpticItem` now has a separate
+`set_position(z, x)` (plain `setPos()`, no geometry invalidation) used for drag moves;
+`sync_from_optic()` (full rebuild) is reserved for actual property edits. `PlotView.refresh()`
+also now calls `self.scene().update()` alongside `self.viewport().update()`, and
+`OpticItem` explicitly sets `CacheMode.NoCache`, as further defense in depth. **This
+was not pixel-confirmed live** (per the offscreen caveat above) — if the doubled outline
+recurs after this change, the drag-specific rebuild wasn't the (or the only) cause;
+check `theme.py`'s dark-mode palette switching and `PlotView`'s aspect-lock/`ViewBox`
+interaction next, and get a real-display repro with exact steps before further changes.
+
+### Round 3: ten items from a real user worklist (`TODO.md`)
+
+Unlike rounds 1-2 (bugs inferred from a screenshot before `TODO.md` had content), this
+batch came from an actual written worklist. A few are worth calling out because the fix
+wasn't just "make the obviously-wrong thing work":
+
+- **Config tab needed a manual "Reset View" click to see its own effect.** Every
+  Config-tab field already wrote into `SystemConfig` and triggered `PlotView.refresh()`
+  live — but `refresh()` only redraws the beam curve; it never re-applies the *view
+  range* (`PlotView.apply_default_view()`), which only ran at project load or an
+  explicit "Reset View" click. This affected two TODO items at once (view-range fields,
+  and beam-curve padding fields, since padding changes `_plotted_z_range`'s auto extent)
+  because both are downstream of the same missing call. Fixed with a new
+  `ConfigTab.viewRangeChanged` signal, emitted only by the fields that define the
+  plotted range (View box + the three padding spins) — deliberately *not* by every
+  Config field, so toggling e.g. "show waist markers" doesn't fight a user's manual
+  pan/zoom.
+- **`InputBeamSpec.x_offset` was completely dead** — stored, saved/loaded, editable in
+  the Beam tab, and never read by anything downstream. The physics only ever tracks a
+  scalar radius `w(z)`, never a real transverse position (this is also why an `Optic`'s
+  own decenter is rendering-only), so `x_offset` is applied the same way: a constant
+  shift added to the plotted beam envelope/waist markers/target marker at render time in
+  `PlotView.refresh()`, not fed into `physics/`.
+- **ROC sign convention**: see the "UI-level R2 sign flip" note under "ABCD ray-transfer
+  matrices" above — the physics/save-format convention didn't change, only what
+  `optics_tab.py`'s R2 spinbox displays.
+- **New-optic dropdown**: reduced from five `OpticKind` entries to two friendly presets
+  ("Flat plate" → `PLANO_PLANO`, "Singlet lens" → `PLANO_CONVEX`) via a small
+  `_ADD_PRESETS` list in `optics_tab.py`. `OpticKind` itself is untouched (still used by
+  `describe_shape()`, save/load, and old project files with other kind values) — only
+  the "Add" combo's choices changed, consistent with "kind is just a starting shape,
+  everything stays editable after."
+
 ## Testing approach
 
 - `physics/` and pure-function GUI utilities (`color_utils.py`) get real `pytest` unit
   tests in `telescope_simulator/tests/`, checked against independent formulas where
   possible.
 - The GUI as a whole is checked with offscreen smoke tests (`QT_QPA_PLATFORM=offscreen`)
-  that construct the real `MainWindow`, call real handler methods (not synthetic mocks),
-  and assert on resulting state — e.g. adding every optic kind and checking the drawn
-  polygon has no NaN/Inf, simulating a drag and checking the model updated, save/load
-  round-tripping a project, or replaying the exact click sequence that reproduced the
-  bug above. These aren't checked into `tests/` as pytest files (they're ad hoc, run via
-  `python -c "..."` during development) — promoting the ones worth keeping permanently
-  into real pytest GUI tests would be a reasonable next step if regressions start
-  recurring.
+  that construct real widgets (`OpticsTab`, `PlotView`, or the full `MainWindow`), call
+  real handler methods (not synthetic mocks), and assert on resulting state — e.g. adding
+  every optic kind and checking the drawn polygon has no NaN/Inf, simulating a drag and
+  checking the model updated, save/load round-tripping a project, or replaying the exact
+  click sequence that reproduced a bug. `tests/test_optics_tab.py` and
+  `tests/test_plot_view.py` are permanent pytest versions of this pattern (state/wiring
+  checks, not pixel checks); one-off variants are still fine to run ad hoc via
+  `python -c "..."` during development, but promote the ones worth keeping permanently.
 - There is currently no automated visual/pixel-level testing, and offscreen rendering is
   known (see above) to not reproduce all real-backend rendering issues — manual
   on-screen verification is still needed for anything touching `OpticItem.paint()`,
