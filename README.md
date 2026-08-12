@@ -7,7 +7,7 @@ a guide for whoever (human or AI) picks up development next: why the tool is sha
 way it is, the physics it implements, how the code is organized, and the traps we
 already found and fixed.
 
-Current version: **v0.3** (see `TODO.md` for the active worklist).
+Current version: **v1.0** (see `TODO.md` for the active worklist).
 
 ## Quick start
 
@@ -425,6 +425,39 @@ Two design choices worth knowing if you touch this:
   above. A successful move calls **both** `optics_tab.update_optic_position()` *and*
   `plot_view.refresh_optic()` — the union of what a canvas drag and an Optics-tab edit
   each do individually — since this change originates in neither of those views.
+
+### Round 5 (v1.0): stale-target eligibility desync, ambiguous clamp snap
+
+A code review of the optimize feature (Round 4) turned up three issues, caught before
+any user report:
+
+**Optimize buttons could act on a target the user had just unpinned.** `PlotView._unpin()`
+(called both when the user clicks the pin marker to clear it, and internally by
+`set_project()` whenever the Optics tab adds/removes an optic) only cleared the visual
+marker — it never emitted `targetChanged`. `MainWindow._current_target` is written solely
+from that signal (see Round 4's note above), so it kept holding the stale pinned
+`TargetInfo` after an unpin, leaving "Optimise for flatness/focus" enabled and able to run
+against a target location the user believed was cleared. Fixed by having `PlotView` track
+the last-emitted pinned `TargetInfo` (`self._pinned_info`) and re-emit it with
+`pinned=False` from `_unpin()` whenever a pin is actually being cleared, so
+`MainWindow.on_target_changed` sees the transition and resets `_current_target` /
+re-evaluates button eligibility the same way it already does for every other target
+change.
+
+**Boundary-clamp snap picked the wrong bound when the feasible interval was narrower than
+the search precision.** `_optimize()` (`physics/optimize.py`) decides whether the search
+landed at a boundary by checking `abs(best_z - bound) <= precision_mm` independently for
+each bound; with tightly packed optics the feasible interval can be smaller than
+`2 * precision_mm`, so both checks come back true and the old `if near_lower: ... elif
+near_upper:` always snapped to the lower bound regardless of which side the search
+actually converged toward. Fixed by comparing the two distances directly and snapping to
+whichever bound is actually closer when both register as "near" — same `clamped=True`
+reporting, correct bound.
+
+**Duplicate sort.** `_optimize()` re-sorted `optics` by `z` even though
+`find_governing_optic()` (called two lines above) had just done the same sort internally.
+`GoverningOptic` now carries the `sorted_optics` list it already computed, so `_optimize()`
+reuses it instead of sorting twice.
 
 ## Testing approach
 

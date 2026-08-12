@@ -3,7 +3,7 @@ waist/Rayleigh annotations, native pan/zoom (from pg.ViewBox), click/drag
 selection of optics, and cursor/pinned beam-target tracking."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -63,6 +63,7 @@ class PlotView(pg.PlotWidget):
         self._plotted_w_abs_max: float = 1.0
         self._pinned = False
         self._pinned_z: Optional[float] = None
+        self._pinned_info: Optional[TargetInfo] = None
 
         self.scene().sigMouseMoved.connect(self._on_scene_mouse_moved)
         self.scene().sigMouseClicked.connect(self._on_scene_mouse_clicked)
@@ -157,16 +158,24 @@ class PlotView(pg.PlotWidget):
             self.addItem(self._target_marker)
         x_offset = self.project.beam.x_offset if self.project is not None else 0.0
         self._target_marker.setData([z], [x_offset])
-        self.targetChanged.emit(TargetInfo(z=z, beam=beam, label=label, pinned=True))
+        self._pinned_info = TargetInfo(z=z, beam=beam, label=label, pinned=True)
+        self.targetChanged.emit(self._pinned_info)
 
     def _on_marker_clicked(self, *_args) -> None:
         self._unpin()
 
     def _unpin(self) -> None:
+        was_pinned = self._pinned
         self._pinned = False
         self._pinned_z = None
         if self._target_marker is not None:
             self._target_marker.setData([], [])
+        if was_pinned and self._pinned_info is not None:
+            # Tell listeners (MainWindow's optimize-eligibility tracking) that
+            # the pinned target is gone, not just that the marker was cleared
+            # -- otherwise a stale pinned TargetInfo lingers downstream.
+            self.targetChanged.emit(replace(self._pinned_info, pinned=False))
+        self._pinned_info = None
 
     def beam_at(self, z: float) -> Optional[Tuple[GaussianBeam, str, float]]:
         """Returns (beam, segment label, clamped z) for whichever segment
@@ -248,7 +257,8 @@ class PlotView(pg.PlotWidget):
             found = self.beam_at(self._pinned_z)
             if found is not None:
                 beam, label, z = found
-                self.targetChanged.emit(TargetInfo(z=z, beam=beam, label=label, pinned=True))
+                self._pinned_info = TargetInfo(z=z, beam=beam, label=label, pinned=True)
+                self.targetChanged.emit(self._pinned_info)
 
         # Force a full repaint rather than relying on Qt's dirty-region
         # tracking: item bounding rects can shrink/move sharply when a

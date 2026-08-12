@@ -39,6 +39,7 @@ class GoverningOptic:
     index: int  # index into the z-sorted optics list
     optic: Optic
     bounds: FeasibleBounds
+    sorted_optics: List[Optic]
 
 
 @dataclass
@@ -134,7 +135,7 @@ def find_governing_optic(
             f"No room to move '{optic.name}' without crossing a neighboring lens "
             f"or the target location."
         )
-    return GoverningOptic(index=idx, optic=optic, bounds=bounds), ""
+    return GoverningOptic(index=idx, optic=optic, bounds=bounds, sorted_optics=sorted_optics), ""
 
 
 def _segment_covering(result: SystemResult, z: float) -> BeamSegment:
@@ -164,7 +165,7 @@ def _optimize(
     if governing is None:
         raise OptimizeUnavailable(reason)
 
-    sorted_optics = sorted(optics, key=lambda o: o.z)
+    sorted_optics = governing.sorted_optics
     optic = governing.optic
     thickness = optic.thickness_center
 
@@ -186,9 +187,16 @@ def _optimize(
             f"Could not find a valid position for '{optic.name}' in the available range."
         )
 
-    near_lower = bool(abs(best_z - governing.bounds.lower) <= precision_mm)
-    near_upper = bool(abs(best_z - governing.bounds.upper) <= precision_mm)
-    if near_lower:
+    dist_lower = abs(best_z - governing.bounds.lower)
+    dist_upper = abs(best_z - governing.bounds.upper)
+    near_lower = bool(dist_lower <= precision_mm)
+    near_upper = bool(dist_upper <= precision_mm)
+    if near_lower and near_upper:
+        # Feasible interval narrower than the search tolerance: both bounds
+        # register as "near", so snap to whichever the search actually
+        # converged closer to instead of always favoring the lower bound.
+        final_z = governing.bounds.lower if dist_lower <= dist_upper else governing.bounds.upper
+    elif near_lower:
         final_z = governing.bounds.lower
     elif near_upper:
         final_z = governing.bounds.upper

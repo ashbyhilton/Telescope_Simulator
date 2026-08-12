@@ -12,7 +12,14 @@ For v0.3:
   [shares the same search/eligibility machinery as "optimise lens for
   flatness", just a different objective function.]
 
-Current version: v0.3
+For v1.0:
+- [fixed] optimize buttons stayed enabled and could run against a stale target after the
+  user unpinned it (pin-marker click, or add/remove optic) — see README "Round 5".
+- [fixed] boundary-clamp snap could pick the wrong bound when the feasible interval was
+  narrower than the search precision — see README "Round 5".
+- [fixed] duplicate sort of the optics list in `_optimize()` — see README "Round 5".
+
+Current version: v1.0
 
 TODO:
 - [fixed] in the view tab, changing the view parameters should automatically update the plot and not require an 'update' button
