@@ -22,6 +22,76 @@ physics/unit tests with:
 .venv\Scripts\python.exe -m pytest telescope_simulator/tests -q
 ```
 
+## Packaging standalone builds
+
+For handing the tool to someone without a Python/PySide6 setup. Both
+platforms share one PyInstaller spec, `packaging/telescope_simulator.spec`
+(gated by `sys.platform` where the two builds genuinely differ), so there's
+one source of truth instead of near-duplicate config per OS.
+
+`PyInstaller` lives in a separate `requirements-build.txt` (not
+`requirements.txt`) on both platforms since it's only needed to produce a
+build, not to run/develop/test the app.
+
+### Windows (.exe)
+
+Builds a `--onedir` distribution (a folder of `TelescopeSimulator.exe` +
+dependencies, not a single-file exe -- faster startup and more reliable
+Qt-plugin loading than `--onefile`):
+
+```
+.venv\Scripts\pip.exe install -r requirements-build.txt
+.venv\Scripts\pyinstaller.exe packaging\telescope_simulator.spec --noconfirm
+```
+
+Output lands in `dist\TelescopeSimulator\`; zip that whole folder to hand it
+to someone.
+
+Notes:
+- The Windows file-properties version resource (Product Name, File Version,
+  Company Name) is generated *inside* `packaging/telescope_simulator.spec`
+  from `telescope_simulator/version.py`'s constants — bump `version.py` for
+  a release and the packaged .exe's properties follow automatically, no
+  second copy to keep in sync.
+- No custom icon is set by default. To add one, drop a `.ico` file at
+  `packaging/icon.ico` and rebuild — the spec picks it up automatically,
+  no spec edits needed.
+- The produced .exe is unsigned, so Windows SmartScreen may warn on first
+  run for anyone who downloads it from outside this machine — expected for
+  an internal lab tool, not a build bug.
+
+### macOS (.dmg)
+
+**Must be run on an actual Mac** — PyInstaller does not cross-compile, so
+this cannot be built from the Windows dev machine, and there's no CI set up
+for it in this repo. Targets Apple Silicon (arm64) only, matching every Mac
+sold since ~2020.
+
+```
+chmod +x packaging/build_macos.sh
+./packaging/build_macos.sh
+```
+
+(assumes a Python 3 environment with the repo's dependencies installable —
+e.g. an activated venv on the Mac; this is a separate environment from the
+Windows `.venv` above, not something that carries over). The script installs
+`requirements.txt` + `requirements-build.txt`, runs the same spec file
+(which adds a macOS-only `BUNDLE()` step to produce a proper `.app`), then
+wraps it into `dist/TelescopeSimulator-<version>-arm64.dmg` via `hdiutil`
+(built into macOS, no extra dependency) — plain drag-to-Applications layout,
+no custom background/branding.
+
+Notes:
+- No custom icon is set by default. To add one, drop an `.icns` file at
+  `packaging/icon.icns` and rebuild.
+- The app is unsigned and not notarized, so macOS Gatekeeper will refuse to
+  open it with an "unidentified developer" warning for anyone who downloads
+  it (the quarantine attribute macOS attaches on download) — right-click →
+  Open bypasses it once, or `xattr -cr TelescopeSimulator.app` clears the
+  flag. This is macOS's equivalent of the Windows SmartScreen note above,
+  not a build bug. Proper notarization needs an Apple Developer account
+  ($99/yr) and is out of scope for now.
+
 ## Thought process / why it's shaped this way
 
 The brief was: draw the beam and the optics in an interactive x-z plane, let the user
