@@ -7,7 +7,10 @@ from typing import Any, Dict, List, Union
 
 from .beam_spec import InputBeamSpec
 from .config import SystemConfig
+from .fit_data import FitDataPoint
 from .optics import Optic, OpticKind
+
+_DEFAULT_FIT_DATA_ROWS = 4
 
 
 @dataclass
@@ -15,20 +18,31 @@ class Project:
     beam: InputBeamSpec = field(default_factory=InputBeamSpec)
     optics: List[Optic] = field(default_factory=list)
     config: SystemConfig = field(default_factory=SystemConfig)
+    fit_data_points: List[FitDataPoint] = field(
+        default_factory=lambda: [FitDataPoint() for _ in range(_DEFAULT_FIT_DATA_ROWS)]
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "beam": self.beam.to_dict(),
             "optics": [o.to_dict() for o in self.optics],
             "config": self.config.to_dict(),
+            "fit_data_points": [p.to_dict() for p in self.fit_data_points],
         }
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Project":
+        raw_fit_data = d.get("fit_data_points")
+        fit_data_points = (
+            [FitDataPoint.from_dict(p) for p in raw_fit_data]
+            if raw_fit_data is not None
+            else [FitDataPoint() for _ in range(_DEFAULT_FIT_DATA_ROWS)]
+        )
         return cls(
             beam=InputBeamSpec.from_dict(d.get("beam", {})),
             optics=[Optic.from_dict(o) for o in d.get("optics", [])],
             config=SystemConfig.from_dict(d.get("config", {})),
+            fit_data_points=fit_data_points,
         )
 
     def save(self, path: Union[str, Path]) -> None:

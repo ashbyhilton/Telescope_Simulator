@@ -47,9 +47,15 @@ class MMAxisItem(pg.AxisItem):
         self._set_unit("mm")
 
     def _set_unit(self, unit: str) -> None:
-        if unit != self._current_unit:
-            self._current_unit = unit
-            self.setLabel(text=self._base_text, units=unit)
+        # Always (re)apply the label, even when the unit string is
+        # unchanged: setLabel() is what drives pyqtgraph's label-visible
+        # layout pass, and the very first call (from __init__) happens
+        # before the widget has real on-screen geometry, so it doesn't
+        # actually render anything until some later setLabel call forces a
+        # fresh layout -- which otherwise only happens once a zoom crosses a
+        # _UNIT_BANDS threshold and the unit string finally changes.
+        self._current_unit = unit
+        self.setLabel(text=self._base_text, units=unit)
 
     def setRange(self, mn: float, mx: float) -> None:
         super().setRange(mn, mx)

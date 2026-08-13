@@ -5,6 +5,7 @@ from __future__ import annotations
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from ...model.config import SystemConfig
+from ...version import APP_AUTHOR, APP_BUILD_DATE, APP_ORGANISATION, APP_VERSION
 
 
 class ConfigTab(QtWidgets.QWidget):
@@ -29,6 +30,7 @@ class ConfigTab(QtWidgets.QWidget):
         layout.addWidget(self._build_beam_curve_box())
         layout.addWidget(self._build_annotations_box())
         layout.addWidget(self._build_appearance_box())
+        layout.addWidget(self._build_about_box())
 
         note = QtWidgets.QLabel(
             "Model assumptions (v1): single wavelength, no dispersion, ambient index fixed at "
@@ -121,6 +123,16 @@ class ConfigTab(QtWidgets.QWidget):
         self.dark_mode_check = QtWidgets.QCheckBox("Dark mode")
         self.dark_mode_check.toggled.connect(self.darkModeToggled.emit)
         layout.addWidget(self.dark_mode_check)
+        return box
+
+    # -- about (read-only, hardcoded, not part of SystemConfig) ---------------
+    def _build_about_box(self) -> QtWidgets.QWidget:
+        box = QtWidgets.QGroupBox("About")
+        form = QtWidgets.QFormLayout(box)
+        form.addRow("Version", QtWidgets.QLabel(APP_VERSION))
+        form.addRow("Date of compile", QtWidgets.QLabel(APP_BUILD_DATE))
+        form.addRow("Author", QtWidgets.QLabel(APP_AUTHOR))
+        form.addRow("Organisation", QtWidgets.QLabel(APP_ORGANISATION))
         return box
 
     # -- helpers -----------------------------------------------------------

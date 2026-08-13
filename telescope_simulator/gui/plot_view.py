@@ -10,6 +10,7 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore
 
+from ..model.fit_data import FitDataPoint
 from ..model.project import Project
 from ..physics.beam import GaussianBeam
 from ..physics.system import OpticalSystem, SystemResult
@@ -53,6 +54,13 @@ class PlotView(pg.PlotWidget):
         self.addItem(self._waist_markers)
         self._target_marker: Optional[pg.ScatterPlotItem] = None
 
+        self._fit_upper_markers = pg.ScatterPlotItem(size=8, symbol="o", brush=pg.mkBrush(40, 160, 220, 230), pen=None)
+        self._fit_lower_markers = pg.ScatterPlotItem(size=8, symbol="o", brush=pg.mkBrush(40, 160, 220, 230), pen=None)
+        self.addItem(self._fit_upper_markers)
+        self.addItem(self._fit_lower_markers)
+        self._fit_labels: List[pg.TextItem] = []
+        self._fit_data_points: List[FitDataPoint] = []
+
         self._optic_items: Dict[int, OpticItem] = {}
         self._rayleigh_regions: List[pg.LinearRegionItem] = []
         self._selected_id: Optional[int] = None
@@ -64,6 +72,7 @@ class PlotView(pg.PlotWidget):
         self._pinned = False
         self._pinned_z: Optional[float] = None
         self._pinned_info: Optional[TargetInfo] = None
+        self._shown_once = False
 
         self.scene().sigMouseMoved.connect(self._on_scene_mouse_moved)
         self.scene().sigMouseClicked.connect(self._on_scene_mouse_clicked)
@@ -189,6 +198,16 @@ class PlotView(pg.PlotWidget):
                 return seg.beam, seg.label, z
         return None
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # The axis labels are set well before the widget has real on-screen
+        # geometry (during MainWindow.__init__, before window.show()), so
+        # force one more range-apply once shown to guarantee both axes are
+        # labeled immediately instead of only after a zoom changes units.
+        if not self._shown_once and self.project is not None:
+            self._shown_once = True
+            self.apply_default_view()
+
     # -- default / reset view -------------------------------------------
     def apply_default_view(self) -> None:
         if self.project is None or self._plotted_z_range is None:
@@ -248,6 +267,7 @@ class PlotView(pg.PlotWidget):
         else:
             self._waist_markers.setData([], [])
         self._update_rayleigh_shading(waists if cfg.show_rayleigh_shading else [])
+        self.set_fit_data_points(self.project.fit_data_points)
 
         if self._pinned and self._pinned_z is not None:
             # A pinned target snapshots a specific GaussianBeam at pin time;
@@ -301,6 +321,32 @@ class PlotView(pg.PlotWidget):
             if seg.z_start - 1e-9 <= zw <= seg.z_end + 1e-9:
                 pts.append((zw, seg.beam.rayleigh_range))
         return pts
+
+    def set_fit_data_points(self, points: List[FitDataPoint]) -> None:
+        """Draws two small circle markers (z, ±diameter/2) per valid
+        Fit-to-data row, plus a point-number text label next to the upper
+        marker. Always shown when data is present, like the target-pin
+        marker -- no Config-tab visibility toggle, unlike waist markers."""
+        self._fit_data_points = points
+        for label in self._fit_labels:
+            self.removeItem(label)
+        self._fit_labels = []
+
+        zs, upper_xs, lower_xs = [], [], []
+        for i, p in enumerate(points):
+            if not p.is_valid():
+                continue
+            half = p.diameter_mm / 2.0
+            zs.append(p.z_mm)
+            upper_xs.append(half)
+            lower_xs.append(-half)
+            label = pg.TextItem(str(i + 1), anchor=(0.5, 1.0), color=(40, 160, 220))
+            label.setPos(p.z_mm, half)
+            self.addItem(label)
+            self._fit_labels.append(label)
+
+        self._fit_upper_markers.setData(zs, upper_xs)
+        self._fit_lower_markers.setData(zs, lower_xs)
 
     def _update_rayleigh_shading(self, waists) -> None:
         for region in self._rayleigh_regions:

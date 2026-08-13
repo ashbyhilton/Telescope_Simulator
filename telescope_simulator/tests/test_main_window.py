@@ -130,6 +130,55 @@ def test_tightening_precision_disables_buttons_on_infeasible_setup(qapp):
     assert "No room" in w.beam_tab.optimize_flatness_btn.toolTip()
 
 
+def test_fit_to_data_updates_beam_and_syncs_beam_tab(qapp):
+    w = MainWindow()
+    from telescope_simulator.physics.beam import GaussianBeam
+
+    true_beam = GaussianBeam.from_measurement(z_ref=50.0, w_ref=0.5, wavelength_nm=w.project.beam.wavelength_nm, n=1.0)
+    # Points straddling the true waist on both sides -- points from only one
+    # side leave the fit unable to distinguish the true waist location from
+    # a spurious one (w(z) alone doesn't disambiguate direction).
+    rows = [(10.0, true_beam), (40.0, true_beam), (60.0, true_beam), (90.0, true_beam)]
+    for row, (z, beam) in enumerate(rows):
+        w.fit_data_tab.table.item(row, 1).setText(str(z))
+        w.fit_data_tab.table.item(row, 2).setText(str(2.0 * beam.w(z)))
+    # editing cells emits fitDataChanged live, syncing project.fit_data_points
+    assert w.fit_data_tab.fit_btn.isEnabled()
+
+    w.fit_data_tab.fit_btn.click()
+
+    assert w.project.beam.z_ref == pytest.approx(50.0, abs=0.1)
+    assert w.project.beam.w_ref == pytest.approx(0.5, abs=0.01)
+    assert w.beam_tab.z_ref_spin.value() == pytest.approx(50.0, abs=0.1)
+    assert "Fit to data" in w.statusBar().currentMessage()
+
+
+def test_fit_to_data_shows_error_without_crashing_on_too_few_rows(qapp):
+    w = MainWindow()
+    w.fit_data_tab.table.item(0, 1).setText("10.0")
+    w.fit_data_tab.table.item(0, 2).setText("1.0")
+
+    w.on_fit_requested()  # button itself would be disabled; call handler directly
+
+    assert "at least 3" in w.fit_data_tab.error_label.text()
+
+
+def test_project_save_load_round_trips_fit_data_points(tmp_path, qapp):
+    w = MainWindow()
+    w.fit_data_tab.table.item(0, 1).setText("5.0")
+    w.fit_data_tab.table.item(0, 2).setText("2.0")
+
+    path = tmp_path / "proj.json"
+    w.current_path = str(path)
+    w.on_save()
+
+    w2 = MainWindow()
+    w2.project = type(w.project).load(str(path))
+    w2._load_project_into_ui()
+
+    assert w2.fit_data_tab.table.item(0, 1).text() == "5"
+
+
 def test_clamped_optimize_shows_status_message_without_crashing(qapp):
     w = MainWindow()
     optic = w.project.optics[0]

@@ -32,6 +32,24 @@ class SystemResult:
     last_surface_z: float
 
 
+def segment_covering(result: SystemResult, z: float) -> BeamSegment:
+    """The BeamSegment whose [z_start, z_end] covers `z`, falling back to
+    the first segment if `z` is before the start (same precedent as
+    PlotView._sample_result's leading-padding region, which also extends the
+    first segment's beam backward -- physically valid since a GaussianBeam
+    is defined for any z within its own homogeneous medium, not just within
+    the [z_start, z_end] window a particular propagate() call happened to
+    bound it to) or the last segment if `z` is past the end (e.g. within
+    trailing padding). Shared by physics/optimize.py and physics/fit.py so
+    neither re-derives this lookup independently."""
+    for seg in result.segments:
+        if seg.z_start - 1e-9 <= z <= seg.z_end + 1e-9:
+            return seg
+    if z < result.segments[0].z_start:
+        return result.segments[0]
+    return result.segments[-1]
+
+
 class OpticalSystem:
     """Chains ABCD propagation through an input beam and an ordered list of
     thick lenses, sorted by their front-surface z position."""

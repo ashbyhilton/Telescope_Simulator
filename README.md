@@ -7,7 +7,7 @@ a guide for whoever (human or AI) picks up development next: why the tool is sha
 way it is, the physics it implements, how the code is organized, and the traps we
 already found and fixed.
 
-Current version: **v1.0** (see `TODO.md` for the active worklist).
+Current version: **v1.1** (see `TODO.md` for the active worklist).
 
 ## Quick start
 
@@ -161,11 +161,16 @@ telescope_simulator/
     optimize.py   # golden-section search for the "optimise lens for
                    # flatness"/"...for focus" Beam-tab buttons; reuses
                    # OpticalSystem.propagate(), never re-derives it
+    fit.py        # 2D Nelder-Mead fit of input-beam (z_waist, w0) to
+                   # measured data points, for the Fit-to-data tab; reuses
+                   # OpticalSystem.propagate() + segment_covering()
   model/          # plain dataclasses + JSON (de)serialization, no physics, no Qt
     optics.py     # Optic, OpticKind, make_default_optic() presets
     beam_spec.py  # InputBeamSpec
     config.py     # SystemConfig (display/view settings, saved per-project)
-    project.py    # Project (beam + optics + config), save()/load(), demo project
+    fit_data.py   # FitDataPoint (one Fit-to-data table row)
+    project.py    # Project (beam + optics + config + fit_data_points),
+                   # save()/load(), demo project
   gui/            # PySide6 + pyqtgraph
     main_window.py    # QMainWindow; the *only* place that wires tabs <-> plot_view
     plot_view.py      # interactive x-z canvas (pg.PlotWidget subclass)
@@ -178,8 +183,11 @@ telescope_simulator/
     tabs/
       beam_tab.py      # input beam form + input/output/target characteristics panels
       optics_tab.py    # optics list, property form, EFL readout
-      config_tab.py    # view/aspect/annotation/color/dark-mode settings
+      config_tab.py    # view/aspect/annotation/color/dark-mode/about settings
+      fit_data_tab.py  # measured (z, diameter) table + "fit input beam" button
   tests/          # pytest; physics + a few pure-function GUI utilities (color_utils)
+version.py        # hardcoded APP_VERSION/APP_BUILD_DATE/APP_AUTHOR/APP_ORGANISATION,
+                   # shown in the Config tab's About section; bump by hand each release
 ```
 
 `main.py` is the only entry point (`QApplication` + `MainWindow`).
@@ -458,6 +466,75 @@ reporting, correct bound.
 `find_governing_optic()` (called two lines above) had just done the same sort internally.
 `GoverningOptic` now carries the `sorted_optics` list it already computed, so `_optimize()`
 reuses it instead of sorting twice.
+
+### Round 6 (v1.1): axis-label render bug, "Fit to data" tab, About section
+
+**Axis labels invisible until a unit-band zoom.** `MMAxisItem._set_unit()`
+(`gui/mm_axis.py`) only called `setLabel()` when the unit string changed. The
+construction-time call (`__init__` → `_set_unit("mm")`) happens before the
+widget has real on-screen geometry (all of `MainWindow.__init__` runs before
+`main.py` calls `window.show()`), and since the initial view range keeps the
+same "mm" unit, nothing forced a relabel/layout pass afterward — until a zoom
+crossed a `_UNIT_BANDS` threshold and the unit string finally changed. Fixed
+by always calling `setLabel()` in `_set_unit()` regardless of whether the
+unit changed, plus a new `PlotView.showEvent()` override that forces one more
+`apply_default_view()` once the widget is actually shown.
+
+**"Fit to data" tab** (`gui/tabs/fit_data_tab.py`, `model/fit_data.py`,
+`physics/fit.py`): a table of measured (z, beam diameter) points that fits
+the *input* beam's `(z_waist, w0)` to best match the data, drawing small
+circle markers + index labels on the canvas for every complete row
+(`PlotView.set_fit_data_points()`, always shown when data exists, same
+precedent as the target-pin marker — not gated behind a Config-tab toggle
+like waist markers). Two design points worth knowing if you touch this:
+
+- **The fit is a full-system fit, not a bare single-segment fit.** A
+  measured point can sit anywhere along the beam path, including after
+  optics, so each trial candidate re-propagates through the *entire*
+  `OpticalSystem` (same optics list, trial input beam) and reads off the
+  predicted radius via `physics/system.segment_covering()` before comparing
+  to the measurement. `_segment_covering` was promoted from a private
+  helper in `physics/optimize.py` to a shared, public function in
+  `physics/system.py` for exactly this reuse.
+- **A 2D Nelder-Mead simplex, not the existing 1D golden-section search.**
+  The first implementation tried to stay consistent with
+  `physics/optimize.py`'s reuse-tested-code style by alternating
+  coordinate descent — two calls to `golden_section_minimize` per outer
+  iteration, one per parameter. It produced a *wrong* answer on a real
+  through-a-lens test case: golden-section search assumes its bracket is
+  unimodal, but a wide bracket for the trial `z_waist` can straddle an
+  optic's position, beyond which `propagate()` raises (an infeasible input
+  beam) — the objective has a hard wall/plateau there, not a single dip,
+  which breaks the search in ways that are easy to miss without an
+  independent-formula test catching it. `physics/fit.py` instead implements
+  a small, dependency-free 2D Nelder-Mead simplex directly (no bracket
+  needed, tolerates the inf-penalty wall via ordinary float comparisons),
+  run from several seeds spread across the data's z-range with a few
+  shrinking-simplex restarts each (a single run can still stall along a
+  narrow, correlated `(z_waist, w0)` ridge) — multi-start was needed even
+  with Nelder-Mead, since this landscape can have more than one good local
+  minimum when the data's z-span is small relative to the beam's Rayleigh
+  range (a near-collimated beam barely curves over the sampled range, so
+  `(z_waist, w0)` is only weakly identifiable from the data alone).
+- **Fixed while testing this**: `segment_covering()` only had a fallback for
+  `z` past the *last* segment (trailing padding); it had no equivalent for
+  `z` before the *first* segment's start. This never came up for
+  `physics/optimize.py`'s use (target `z` is always within or past the
+  existing system), but a fit trial's candidate `z_waist` can end up
+  positioned *after* some measurement point during the search, at which
+  point that point's `z` falls before the trial's own first segment. Fixed
+  by falling back to the first segment in that case — the same precedent
+  `PlotView._sample_result`'s leading-padding region already uses (a
+  `GaussianBeam` is valid for any `z` within its own homogeneous medium, not
+  just within whatever `[z_start, z_end]` window one particular
+  `propagate()` call happened to bound it to).
+
+**Config tab "About" section**: version/build-date/author/organisation are
+hardcoded, manually-updated constants in the new `version.py` — there's no
+build system in this repo to derive them from, and the user preferred that
+over a git-derived runtime lookup (which would break if ever run from a copy
+without `.git`). Bump `version.py` by hand each release, the same way
+`README.md`'s and `TODO.md`'s "Current version" lines already are.
 
 ## Testing approach
 

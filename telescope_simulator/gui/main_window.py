@@ -7,6 +7,7 @@ from pyqtgraph.Qt import QtWidgets
 from ..model.beam_spec import InputBeamSpec
 from ..model.config import SystemConfig
 from ..model.project import Project, default_demo_project
+from ..physics.fit import FitUnavailable, fit_beam_to_data
 from ..physics.optimize import (
     OptimizeUnavailable,
     find_governing_optic,
@@ -18,6 +19,7 @@ from .app_settings import AppSettings
 from .plot_view import PlotView, TargetInfo
 from .tabs.beam_tab import BeamTab
 from .tabs.config_tab import ConfigTab
+from .tabs.fit_data_tab import FitDataTab
 from .tabs.optics_tab import OpticsTab
 from .theme import apply_theme
 
@@ -37,11 +39,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.beam_tab = BeamTab()
         self.optics_tab = OpticsTab()
         self.config_tab = ConfigTab()
+        self.fit_data_tab = FitDataTab()
 
         tabs = QtWidgets.QTabWidget()
         tabs.addTab(self.beam_tab, "Beam")
         tabs.addTab(self.optics_tab, "Optics")
         tabs.addTab(self.config_tab, "Config")
+        tabs.addTab(self.fit_data_tab, "Fit to data")
         tabs.setMinimumWidth(360)
         tabs.setMaximumWidth(460)
 
@@ -82,11 +86,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.beam_tab.optimizeFlatnessRequested.connect(self.on_optimize_flatness_clicked)
         self.beam_tab.optimizeFocusRequested.connect(self.on_optimize_focus_clicked)
         self.beam_tab.targetPrecisionChanged.connect(self.on_target_precision_changed)
+        self.fit_data_tab.fitDataChanged.connect(self.on_fit_data_changed)
+        self.fit_data_tab.fitRequested.connect(self.on_fit_requested)
 
     def _load_project_into_ui(self) -> None:
         self.beam_tab.set_beam(self.project.beam)
         self.optics_tab.set_optics(self.project.optics)
         self.config_tab.set_config(self.project.config)
+        self.fit_data_tab.set_points(self.project.fit_data_points)
         self.plot_view.set_project(self.project)
         self._refresh_output_readouts()
         self._current_target = None
@@ -192,6 +199,35 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         else:
             self.statusBar().showMessage(f"Optimise for {label}: done.")
+
+    # -- fit-to-data tab -> model ---------------------------------------------
+    def on_fit_data_changed(self) -> None:
+        points = self.fit_data_tab.points_snapshot()
+        self.project.fit_data_points = points
+        # Immediate per-keystroke marker feedback, without waiting on a full
+        # propagate()/refresh() -- mirrors why _pin_at() updates its marker
+        # directly rather than only through refresh().
+        self.plot_view.set_fit_data_points(points)
+
+    def on_fit_requested(self) -> None:
+        points = self.fit_data_tab.points_snapshot()
+        try:
+            result = fit_beam_to_data(self.project.beam, self.project.optics, points)
+        except FitUnavailable as exc:
+            self.fit_data_tab.show_error(str(exc))
+            self.statusBar().showMessage(f"Fit to data: {exc}")
+            return
+        self.fit_data_tab.show_error("")
+        self.project.beam.z_ref = result.z_waist_mm
+        self.project.beam.w_ref = result.w0_mm
+        self.project.beam.collimated = True
+        self.project.beam.r_ref = None
+        self.beam_tab.set_beam(self.project.beam)
+        self.plot_view.refresh()
+        self._refresh_output_readouts()
+        self.statusBar().showMessage(
+            f"Fit to data: done (residual {result.objective_value:.4g} mm², {result.iterations} it)."
+        )
 
     def _refresh_output_readouts(self) -> None:
         try:

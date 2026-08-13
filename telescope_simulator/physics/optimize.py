@@ -14,7 +14,7 @@ from typing import Callable, List, Optional, Tuple
 
 from ..model.beam_spec import InputBeamSpec
 from ..model.optics import Optic
-from .system import BeamSegment, OpticalSystem, SystemResult
+from .system import OpticalSystem, SystemResult, segment_covering
 
 _GOLDEN = (5.0 ** 0.5 - 1.0) / 2.0  # ~0.618
 
@@ -138,19 +138,12 @@ def find_governing_optic(
     return GoverningOptic(index=idx, optic=optic, bounds=bounds, sorted_optics=sorted_optics), ""
 
 
-def _segment_covering(result: SystemResult, z: float) -> BeamSegment:
-    for seg in result.segments:
-        if seg.z_start - 1e-9 <= z <= seg.z_end + 1e-9:
-            return seg
-    return result.segments[-1]
-
-
 def _flatness_objective(result: SystemResult, target_z: float) -> float:
-    return _segment_covering(result, target_z).beam.divergence_half_angle
+    return segment_covering(result, target_z).beam.divergence_half_angle
 
 
 def _focus_objective(result: SystemResult, target_z: float) -> float:
-    return abs(_segment_covering(result, target_z).beam.z_waist - target_z)
+    return abs(segment_covering(result, target_z).beam.z_waist - target_z)
 
 
 def _optimize(
