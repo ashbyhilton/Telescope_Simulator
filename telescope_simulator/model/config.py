@@ -11,7 +11,7 @@ class SystemConfig:
     plot_trailing_padding_min_mm: float = 20.0
     beam_curve_points_per_segment: int = 200
     show_waist_markers: bool = True
-    show_rayleigh_shading: bool = True
+    show_rayleigh_shading: bool = False
 
     # View / aspect ratio (x-span / z-span). Locked by default at 0.3 so the
     # transverse beam size stays readable against much larger z spans.
@@ -24,8 +24,6 @@ class SystemConfig:
     z_range_max: Optional[float] = None
     x_range_min: Optional[float] = None
     x_range_max: Optional[float] = None
-
-    color_by_wavelength: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -41,7 +39,6 @@ class SystemConfig:
             "z_range_max": self.z_range_max,
             "x_range_min": self.x_range_min,
             "x_range_max": self.x_range_max,
-            "color_by_wavelength": self.color_by_wavelength,
         }
 
     @classmethod
@@ -52,12 +49,11 @@ class SystemConfig:
             plot_trailing_padding_min_mm=d.get("plot_trailing_padding_min_mm", 20.0),
             beam_curve_points_per_segment=d.get("beam_curve_points_per_segment", 200),
             show_waist_markers=d.get("show_waist_markers", True),
-            show_rayleigh_shading=d.get("show_rayleigh_shading", True),
+            show_rayleigh_shading=d.get("show_rayleigh_shading", False),
             lock_aspect_ratio=d.get("lock_aspect_ratio", True),
             aspect_ratio=d.get("aspect_ratio", 0.3),
             z_range_min=d.get("z_range_min"),
             z_range_max=d.get("z_range_max"),
             x_range_min=d.get("x_range_min"),
             x_range_max=d.get("x_range_max"),
-            color_by_wavelength=d.get("color_by_wavelength", False),
         )

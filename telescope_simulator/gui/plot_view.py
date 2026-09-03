@@ -3,6 +3,7 @@ waist/Rayleigh annotations, native pan/zoom (from pg.ViewBox), click/drag
 selection of optics, and cursor/pinned beam-target tracking."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from typing import Dict, List, Optional, Tuple
 
@@ -11,11 +12,13 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore
 
 from ..model.fit_data import FitDataPoint
+from ..model.optics import describe_shape, edge_thickness_from_center, group_key
 from ..model.project import Project
 from ..physics.beam import GaussianBeam
+from ..physics.matrices import thick_lens
 from ..physics.system import OpticalSystem, SystemResult
 from .color_utils import wavelength_to_rgb
-from .mm_axis import MMAxisItem
+from .mm_axis import MMAxisItem, format_length_mm
 from .optic_item import OpticItem
 
 DEFAULT_BEAM_RGB = (80, 140, 200)
@@ -31,7 +34,7 @@ class TargetInfo:
 
 class PlotView(pg.PlotWidget):
     opticSelected = QtCore.Signal(int)  # optic id, or -1 for deselect
-    opticMoved = QtCore.Signal(int, float, float)  # id, z, x
+    opticMoved = QtCore.Signal(int, float)  # id, z
     targetChanged = QtCore.Signal(object)  # TargetInfo
 
     def __init__(self, parent=None):
@@ -62,6 +65,12 @@ class PlotView(pg.PlotWidget):
         self._fit_data_points: List[FitDataPoint] = []
 
         self._optic_items: Dict[int, OpticItem] = {}
+        self._hover_overlay = pg.TextItem(
+            anchor=(0.0, 1.0), color=(20, 20, 20), fill=(255, 255, 230, 230), border=(120, 120, 90),
+        )
+        self._hover_overlay.setZValue(100)
+        self._hover_overlay.hide()
+        self.addItem(self._hover_overlay)
         self._rayleigh_regions: List[pg.LinearRegionItem] = []
         self._selected_id: Optional[int] = None
         self.project: Optional[Project] = None
@@ -99,6 +108,8 @@ class PlotView(pg.PlotWidget):
                 item = OpticItem(optic)
                 item.sigClicked.connect(self._on_item_clicked)
                 item.sigDragged.connect(self._on_item_dragged)
+                item.sigHoverEnter.connect(self._on_item_hover_enter)
+                item.sigHoverLeave.connect(self._on_item_hover_leave)
                 self._optic_items[optic.id] = item
                 self.addItem(item)
             else:
@@ -106,27 +117,77 @@ class PlotView(pg.PlotWidget):
                 item.sync_from_optic()
 
     def refresh_optic(self, optic_id: int) -> None:
-        item = self._optic_items.get(optic_id)
-        if item is not None:
-            item.sync_from_optic()
+        self.refresh_optics([optic_id])
+
+    def refresh_optics(self, optic_ids: List[int]) -> None:
+        """Batched form of refresh_optic(): resyncs several OpticItems (e.g.
+        every member of a composite group after an optimize run moved them
+        all) with a single refresh() at the end instead of one per id."""
+        for optic_id in optic_ids:
+            item = self._optic_items.get(optic_id)
+            if item is not None:
+                item.sync_from_optic()
         self.refresh()
 
-    def set_selected(self, optic_id: int) -> None:
-        self._selected_id = optic_id if optic_id >= 0 else None
-        for oid, item in self._optic_items.items():
-            item.set_selected(oid == self._selected_id)
+    def set_selected(self, key: int) -> None:
+        """`key` is a `group_key` value: an optic's own id if standalone, or
+        its composite group's id -- so selecting one member of a group
+        highlights every sibling sharing that group_id."""
+        self._selected_id = key if key >= 0 else None
+        for item in self._optic_items.values():
+            item.set_selected(group_key(item.optic) == self._selected_id)
 
     # -- interaction: optics ----------------------------------------------
     def _on_item_clicked(self, item: OpticItem) -> None:
-        self.set_selected(item.optic.id)
-        self.opticSelected.emit(item.optic.id)
+        key = group_key(item.optic)
+        self.set_selected(key)
+        self.opticSelected.emit(key)
 
-    def _on_item_dragged(self, item: OpticItem, new_z: float, new_x: float) -> None:
-        item.optic.z = new_z
-        item.optic.x = new_x
-        item.set_position(new_z, new_x)
-        self.opticMoved.emit(item.optic.id, new_z, new_x)
+    def _on_item_dragged(self, item: OpticItem, new_z: float) -> None:
+        # A composite-lens group is a rigid unit: dragging any one member
+        # shifts every sibling sharing the same group_key by the same delta,
+        # so the group's internal spacings never change from a drag.
+        delta = new_z - item.optic.z
+        key = group_key(item.optic)
+        members = [o for o in self.project.optics if group_key(o) == key]
+        for optic in members:
+            optic.z += delta
+            member_item = self._optic_items.get(optic.id)
+            if member_item is not None:
+                member_item.set_position(optic.z)
+        self.opticMoved.emit(key, min(o.z for o in members))
         self.refresh()
+
+    def _on_item_hover_enter(self, item: OpticItem) -> None:
+        self._hover_overlay.setText(self._hover_text(item.optic))
+        half_d = max(item.optic.diameter_full, 1e-6) / 2.0
+        self._hover_overlay.setPos(item.optic.z, half_d)
+        self._hover_overlay.show()
+
+    def _on_item_hover_leave(self, item: OpticItem) -> None:
+        self._hover_overlay.hide()
+
+    @staticmethod
+    def _hover_text(optic) -> str:
+        lines = [optic.name, describe_shape(optic.r1, optic.r2)]
+        if optic.group_name:
+            lines.insert(0, f"[{optic.group_name}]")
+        lines.append(f"Diameter: {format_length_mm(optic.diameter_full)}")
+        lines.append(f"Center thickness: {format_length_mm(optic.thickness_center)}")
+        edge = edge_thickness_from_center(optic.r1, optic.r2, optic.diameter_full, optic.thickness_center)
+        lines.append(f"Edge thickness: {format_length_mm(edge)}")
+        r1_text = "flat" if math.isinf(optic.r1) else format_length_mm(optic.r1)
+        r2_text = "flat" if math.isinf(optic.r2) else format_length_mm(-optic.r2)
+        lines.append(f"R1: {r1_text}   R2: {r2_text}")
+        lines.append(f"n: {optic.n:.4g}")
+        try:
+            m = thick_lens(optic.thickness_center, optic.n, optic.r1, optic.r2)
+            power = -m[1, 0]
+            efl_text = "∞" if abs(power) < 1e-12 else format_length_mm(1.0 / power)
+        except (ValueError, ZeroDivisionError):
+            efl_text = "-"
+        lines.append(f"EFL: {efl_text}")
+        return "\n".join(lines)
 
     # -- interaction: cursor / pinned target location ----------------------
     def _on_scene_mouse_moved(self, scene_pos) -> None:
@@ -165,8 +226,7 @@ class PlotView(pg.PlotWidget):
             )
             self._target_marker.sigClicked.connect(self._on_marker_clicked)
             self.addItem(self._target_marker)
-        x_offset = self.project.beam.x_offset if self.project is not None else 0.0
-        self._target_marker.setData([z], [x_offset])
+        self._target_marker.setData([z], [0.0])
         self._pinned_info = TargetInfo(z=z, beam=beam, label=label, pinned=True)
         self.targetChanged.emit(self._pinned_info)
 
@@ -217,15 +277,14 @@ class PlotView(pg.PlotWidget):
         z_hi = cfg.z_range_max if cfg.z_range_max is not None else self._plotted_z_range[1]
         z_span = max(z_hi - z_lo, 1e-9)
 
-        x_offset = self.project.beam.x_offset
         if cfg.x_range_min is not None and cfg.x_range_max is not None:
             x_lo, x_hi = cfg.x_range_min, cfg.x_range_max
         elif cfg.lock_aspect_ratio:
             half_x = 0.5 * z_span * cfg.aspect_ratio
-            x_lo, x_hi = x_offset - half_x, x_offset + half_x
+            x_lo, x_hi = -half_x, half_x
         else:
             half_x = self._plotted_w_abs_max * 1.15
-            x_lo, x_hi = x_offset - half_x, x_offset + half_x
+            x_lo, x_hi = -half_x, half_x
 
         self.setRange(xRange=(z_lo, z_hi), yRange=(x_lo, x_hi), padding=0)
 
@@ -245,25 +304,19 @@ class PlotView(pg.PlotWidget):
         self._plotted_w_abs_max = float(np.max(w_all)) if len(w_all) else 1.0
 
         cfg = self.project.config
-        rgb = wavelength_to_rgb(self.project.beam.wavelength_nm) if cfg.color_by_wavelength else DEFAULT_BEAM_RGB
+        rgb = wavelength_to_rgb(self.project.beam.wavelength_nm)
         pen = pg.mkPen(rgb, width=2)
         self._beam_upper.setPen(pen)
         self._beam_lower.setPen(pen)
         self._beam_fill.setBrush(pg.mkBrush(rgb[0], rgb[1], rgb[2], 60))
 
-        # x_offset shifts the whole beam envelope's transverse center; the
-        # physics only ever tracks a scalar radius w(z), not a real 2D
-        # transverse position (matching how an Optic's own decenter is
-        # rendering-only too -- see README's documented v1 simplifications),
-        # so this is a constant, uniform shift applied at render time only.
-        x_offset = self.project.beam.x_offset
-        self._beam_upper.setData(z_all, w_all + x_offset)
-        self._beam_lower.setData(z_all, -w_all + x_offset)
-        self._axis_line.setData([z_all[0], z_all[-1]], [x_offset, x_offset])
+        self._beam_upper.setData(z_all, w_all)
+        self._beam_lower.setData(z_all, -w_all)
+        self._axis_line.setData([z_all[0], z_all[-1]], [0.0, 0.0])
 
         waists = self._find_waists(result)
         if cfg.show_waist_markers and waists:
-            self._waist_markers.setData([z for z, _ in waists], [x_offset] * len(waists))
+            self._waist_markers.setData([z for z, _ in waists], [0.0] * len(waists))
         else:
             self._waist_markers.setData([], [])
         self._update_rayleigh_shading(waists if cfg.show_rayleigh_shading else [])

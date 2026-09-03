@@ -4,7 +4,7 @@ import itertools
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 
 class OpticKind(Enum):
@@ -42,11 +42,13 @@ class Optic:
     r2: float = float("inf")  # mm, back surface radius of curvature
     n: float = 1.5168  # refractive index (N-BK7 @ 587.6nm by default)
     z: float = 0.0  # mm, global position of the front-surface vertex
-    x: float = 0.0  # mm, transverse decenter
-    angle_deg: float = 0.0  # tilt of the optic normal relative to +z (cosmetic in v1)
     lock_z: bool = False
-    lock_x: bool = True
-    lock_angle: bool = True
+    group_id: Optional[int] = None  # None = standalone; a shared value means these
+    # Optic instances are members of one rigid "composite lens" group (see
+    # gui/dialogs/add_optic_dialog.py) -- they are dragged/removed together as
+    # one unit. The group's id is simply the id of its first (frontmost)
+    # member; no separate id counter is needed.
+    group_name: str = ""  # display name, duplicated on every member for simplicity
     id: int = field(default_factory=lambda: next(_id_counter))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -60,11 +62,9 @@ class Optic:
             "r2": self.r2,
             "n": self.n,
             "z": self.z,
-            "x": self.x,
-            "angle_deg": self.angle_deg,
             "lock_z": self.lock_z,
-            "lock_x": self.lock_x,
-            "lock_angle": self.lock_angle,
+            "group_id": self.group_id,
+            "group_name": self.group_name,
         }
 
     @classmethod
@@ -78,11 +78,9 @@ class Optic:
             r2=d.get("r2", float("inf")),
             n=d.get("n", 1.5168),
             z=d.get("z", 0.0),
-            x=d.get("x", 0.0),
-            angle_deg=d.get("angle_deg", 0.0),
             lock_z=d.get("lock_z", False),
-            lock_x=d.get("lock_x", False),
-            lock_angle=d.get("lock_angle", False),
+            group_id=d.get("group_id"),
+            group_name=d.get("group_name", ""),
         )
         if "id" in d:
             optic.id = d["id"]
@@ -95,6 +93,15 @@ def make_default_optic(kind: OpticKind, name: str, z: float = 0.0) -> Optic:
     afterwards."""
     defaults = _KIND_DEFAULTS[kind]
     return Optic(name=name, kind=kind, z=z, **defaults)
+
+
+def group_key(optic: "Optic") -> int:
+    """Canonical selection/list-row key: an optic's own id if standalone, or
+    its composite group's id (shared by every member) otherwise. Using this
+    everywhere a UI needs to key on "this optic or its group" means a
+    standalone optic (the overwhelmingly common case) behaves identically to
+    before group_id existed."""
+    return optic.group_id if optic.group_id is not None else optic.id
 
 
 def describe_shape(r1: float, r2: float) -> str:
@@ -118,3 +125,53 @@ def describe_shape(r1: float, r2: float) -> str:
     if not front_convex and not back_convex:
         return "Biconcave"
     return "Meniscus"
+
+
+def surface_sag(radius: float, x: float) -> float:
+    """Sag of a spherical surface at radial coordinate `x`, relative to its
+    own vertex (i.e. with the vertex placed at z=0) -- same sign convention
+    as everywhere else in this module (R > 0 if the center of curvature lies
+    on the +z side of the vertex). 0.0 for a flat (infinite-radius) surface,
+    per this app's confirmed "flat contributes no sag" rule. Pure geometry,
+    reused by both `gui/optic_item.py`'s rendering and the edge/center
+    thickness coupling below -- don't re-derive this elsewhere."""
+    if math.isinf(radius):
+        return 0.0
+    r_eff = abs(radius)
+    x_clamped = min(abs(x), 0.999 * r_eff)
+    return radius - math.copysign(1.0, radius) * math.sqrt(r_eff * r_eff - x_clamped * x_clamped)
+
+
+def edge_thickness_from_center(r1: float, r2: float, diameter_full: float, thickness_center: float) -> float:
+    """The lens thickness at the clear-aperture edge, derived from its
+    center thickness and both surfaces' sag at the edge radius. Both sag
+    terms are 0 for flat surfaces, so a flat-flat window's edge thickness
+    always equals its center thickness."""
+    half_d = diameter_full / 2.0
+    return thickness_center + surface_sag(r2, half_d) - surface_sag(r1, half_d)
+
+
+def center_thickness_from_edge(r1: float, r2: float, diameter_full: float, thickness_edge: float) -> float:
+    """Inverse of `edge_thickness_from_center` -- linear in the thickness
+    term, so no iterative solve is needed."""
+    half_d = diameter_full / 2.0
+    return thickness_edge - surface_sag(r2, half_d) + surface_sag(r1, half_d)
+
+
+def layout_group_z(elements: List["Optic"], spacings_mm: List[float], anchor_z: float = 0.0) -> List[float]:
+    """Absolute front-vertex z for each element of a composite-lens chain:
+    element 0 at `anchor_z`, each subsequent element after the previous
+    one's `thickness_center` plus the air gap in `spacings_mm` (length
+    len(elements)-1, spacing after element i). Mirrors the z_cursor-advance
+    arithmetic `physics.system.OpticalSystem.propagate()` already does for a
+    flat optics list -- a composite group must lay out to the exact z
+    positions physics will later re-derive independently from those values,
+    so this is the one place that arithmetic is written."""
+    zs = []
+    z = anchor_z
+    for i, element in enumerate(elements):
+        zs.append(z)
+        z += element.thickness_center
+        if i < len(spacings_mm):
+            z += spacings_mm[i]
+    return zs

@@ -179,6 +179,46 @@ def test_project_save_load_round_trips_fit_data_points(tmp_path, qapp):
     assert w2.fit_data_tab.table.item(0, 1).text() == "5"
 
 
+def test_optimize_moves_every_member_of_a_composite_group_and_syncs_canvas(qapp):
+    """Optimizing a composite lens must shift every member together (same
+    delta) and resync every member's OpticItem on the canvas -- not just
+    move the one sub-optic that happens to be 'the optic before the
+    target', leaving its group-mates behind."""
+    from telescope_simulator.model.optics import Optic
+
+    w = MainWindow()
+    demo = w.project.optics[0]
+
+    m1 = Optic(name="E1", diameter_full=25.4, thickness_center=4.0, r1=60.0, r2=float("inf"),
+               z=demo.z + demo.thickness_center + 20.0)
+    m2 = Optic(name="E2", diameter_full=25.4, thickness_center=3.0, r1=float("inf"), r2=-40.0,
+               z=m1.z + m1.thickness_center + 3.0)
+    m1.group_id = m2.group_id = m1.id
+    m1.group_name = m2.group_name = "Doublet"
+    w.project.optics.append(m1)
+    w.project.optics.append(m2)
+    w.optics_tab.set_optics(w.project.optics)
+    w.plot_view.set_project(w.project)
+
+    original_gap = m2.z - (m1.z + m1.thickness_center)
+    original_m1_z = m1.z
+
+    found = w.plot_view.beam_at(m2.z + m2.thickness_center + 200.0)
+    assert found is not None
+    beam, label, z = found
+    w.plot_view._pin_at(z, beam, label)
+
+    w.optics_tab.select_optic(m1.id)
+    w.beam_tab.optimize_flatness_btn.click()
+
+    assert m1.z != original_m1_z
+    new_gap = m2.z - (m1.z + m1.thickness_center)
+    assert new_gap == pytest.approx(original_gap)
+    assert w.plot_view._optic_items[m1.id].pos().x() == pytest.approx(m1.z, abs=1e-3)
+    assert w.plot_view._optic_items[m2.id].pos().x() == pytest.approx(m2.z, abs=1e-3)
+    assert w.optics_tab.group_z_spin.value() == pytest.approx(m1.z, abs=1e-3)
+
+
 def test_clamped_optimize_shows_status_message_without_crashing(qapp):
     w = MainWindow()
     optic = w.project.optics[0]

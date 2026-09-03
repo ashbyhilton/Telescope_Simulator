@@ -16,8 +16,7 @@ class ConfigTab(QtWidgets.QWidget):
     # plotted z/x range itself (View box, plus the beam-curve padding
     # fields) -- so the canvas snaps to the new range immediately instead of
     # requiring a manual "Reset View" click, without every unrelated Config
-    # toggle (annotations, color-by-wavelength, ...) also fighting a user's
-    # manual pan/zoom.
+    # toggle (annotations, ...) also fighting a user's manual pan/zoom.
     viewRangeChanged = QtCore.Signal()
 
     def __init__(self, parent=None):
@@ -33,8 +32,8 @@ class ConfigTab(QtWidgets.QWidget):
         layout.addWidget(self._build_about_box())
 
         note = QtWidgets.QLabel(
-            "Model assumptions (v1): single wavelength, no dispersion, ambient index fixed at "
-            "1.0 (air), tilt affects rendering/aperture projection only (no induced astigmatism), "
+            "Model assumptions: single wavelength, no dispersion, ambient index fixed at "
+            "1.0 (air), strictly axis-aligned (no transverse offset or tilt), "
             "no aperture-clipping/vignetting."
         )
         note.setWordWrap(True)
@@ -89,18 +88,15 @@ class ConfigTab(QtWidgets.QWidget):
         self.trailing_min_spin = self._mm_spin()
         self.resolution_spin = QtWidgets.QSpinBox()
         self.resolution_spin.setRange(10, 5000)
-        self.color_by_wavelength_check = QtWidgets.QCheckBox("Color beam by wavelength")
 
         form.addRow("Plot padding before input plane", self.leading_pad_spin)
         form.addRow("Plot padding past output (× zᵣ)", self.trailing_mult_spin)
         form.addRow("Minimum plot padding past output", self.trailing_min_spin)
         form.addRow("Beam curve points per segment", self.resolution_spin)
-        form.addRow(self.color_by_wavelength_check)
 
         for w in (self.leading_pad_spin, self.trailing_mult_spin, self.trailing_min_spin):
             w.valueChanged.connect(self._on_view_range_changed)
         self.resolution_spin.valueChanged.connect(self._on_changed)
-        self.color_by_wavelength_check.toggled.connect(self._on_changed)
 
         return box
 
@@ -180,7 +176,6 @@ class ConfigTab(QtWidgets.QWidget):
         self.config.plot_trailing_padding_zr_multiple = self.trailing_mult_spin.value()
         self.config.plot_trailing_padding_min_mm = self.trailing_min_spin.value()
         self.config.beam_curve_points_per_segment = int(self.resolution_spin.value())
-        self.config.color_by_wavelength = self.color_by_wavelength_check.isChecked()
         self.config.show_waist_markers = self.waist_markers_check.isChecked()
         self.config.show_rayleigh_shading = self.rayleigh_shading_check.isChecked()
         self.configChanged.emit(self.config)
@@ -210,7 +205,6 @@ class ConfigTab(QtWidgets.QWidget):
         self.trailing_mult_spin.setValue(config.plot_trailing_padding_zr_multiple)
         self.trailing_min_spin.setValue(config.plot_trailing_padding_min_mm)
         self.resolution_spin.setValue(config.beam_curve_points_per_segment)
-        self.color_by_wavelength_check.setChecked(config.color_by_wavelength)
         self.waist_markers_check.setChecked(config.show_waist_markers)
         self.rayleigh_shading_check.setChecked(config.show_rayleigh_shading)
         self._updating = False

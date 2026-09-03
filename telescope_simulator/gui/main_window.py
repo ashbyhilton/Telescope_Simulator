@@ -6,6 +6,7 @@ from pyqtgraph.Qt import QtWidgets
 
 from ..model.beam_spec import InputBeamSpec
 from ..model.config import SystemConfig
+from ..model.optics import group_key
 from ..model.project import Project, default_demo_project
 from ..physics.fit import FitUnavailable, fit_beam_to_data
 from ..physics.optimize import (
@@ -103,8 +104,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_optic_selected_from_canvas(self, optic_id: int) -> None:
         self.optics_tab.select_optic(optic_id)
 
-    def on_optic_moved_from_canvas(self, optic_id: int, z: float, x: float) -> None:
-        self.optics_tab.update_optic_position(optic_id, z, x)
+    def on_optic_moved_from_canvas(self, optic_id: int, z: float) -> None:
+        self.optics_tab.update_optic_position(optic_id, z)
         self._refresh_output_readouts()
 
     # -- optics tab -> model ------------------------------------------------
@@ -177,23 +178,34 @@ class MainWindow(QtWidgets.QMainWindow):
             self._recompute_optimize_eligibility()
             return
 
-        optic = next((o for o in self.project.optics if o.id == result.optic_id), None)
+        by_id = {o.id: o for o in self.project.optics}
+        optic = by_id.get(result.optic_id)
         if optic is None:
             return
-        optic.z = result.z
+        # result.moved carries every optic that actually needs to shift --
+        # just the one optic for a standalone lens, or every member of a
+        # composite group (same rigid-group semantics as a canvas drag, see
+        # PlotView._on_item_dragged) when the governing unit is a group.
+        for moved_id, new_z in result.moved:
+            moved_optic = by_id.get(moved_id)
+            if moved_optic is not None:
+                moved_optic.z = new_z
         # Union of what a canvas drag and an Optics-tab edit each already do
         # individually (see on_optic_moved_from_canvas/on_optic_property_changed)
         # -- this change originates in neither of those views, so both halves
-        # are needed: sync the Optics tab's form, and fully resync the canvas
-        # (which also re-derives the pinned target panel via refresh()).
-        self.optics_tab.update_optic_position(optic.id, optic.z, optic.x)
-        self.plot_view.refresh_optic(optic.id)
+        # are needed: sync the Optics tab's form/summary (keyed by the
+        # group, if any, not just the representative optic, so a composite
+        # optimize keeps the group panel showing the right anchor z), and
+        # fully resync every moved optic's canvas item.
+        self.optics_tab.update_optic_position(group_key(optic), min(z for _, z in result.moved))
+        self.plot_view.refresh_optics([moved_id for moved_id, _ in result.moved])
         self._refresh_output_readouts()
         self._recompute_optimize_eligibility()
 
         if result.clamped:
+            display_name = optic.group_name if optic.group_id is not None else optic.name
             self.statusBar().showMessage(
-                f"Optimise for {label}: '{optic.name}' hit the edge of its available "
+                f"Optimise for {label}: '{display_name}' hit the edge of its available "
                 f"travel and was clamped there to avoid crossing a neighboring lens "
                 f"or the target location."
             )

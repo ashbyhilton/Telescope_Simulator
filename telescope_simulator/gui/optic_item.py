@@ -6,30 +6,19 @@ takes priority over the ViewBox's own pan gesture.
 """
 from __future__ import annotations
 
-import math
-
-import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from ..model.optics import Optic
-
-
-def _surface_z(x: np.ndarray, radius: float, offset: float) -> np.ndarray:
-    """Sag of a spherical surface with vertex at local z=`offset`. Radius
-    sign convention: positive if the center of curvature is on the +z side
-    of the vertex (see physics/matrices.py)."""
-    if math.isinf(radius):
-        return np.full_like(x, offset)
-    r_eff = abs(radius)
-    x_clamped = np.clip(x, -0.999 * r_eff, 0.999 * r_eff)
-    return offset + radius - math.copysign(1.0, radius) * np.sqrt(r_eff * r_eff - x_clamped * x_clamped)
+from .lens_geometry import build_lens_polygon
 
 
 class OpticItem(pg.GraphicsObject):
     sigClicked = QtCore.Signal(object)
-    sigDragged = QtCore.Signal(object, float, float)
+    sigDragged = QtCore.Signal(object, float)
     sigDragFinished = QtCore.Signal(object)
+    sigHoverEnter = QtCore.Signal(object)
+    sigHoverLeave = QtCore.Signal(object)
 
     GLASS_BRUSH = QtGui.QBrush(QtGui.QColor(140, 190, 230, 120))
     GLASS_PEN = QtGui.QPen(QtGui.QColor(60, 110, 150))
@@ -41,9 +30,10 @@ class OpticItem(pg.GraphicsObject):
         self.selected = False
         self._polygon = QtGui.QPolygonF()
         self._bounds = QtCore.QRectF()
-        self._press_optic_zx = None
+        self._press_optic_z = None
         self._press_data_pos = None
         self.setAcceptedMouseButtons(QtCore.Qt.MouseButton.LeftButton)
+        self.setAcceptHoverEvents(True)
         # Explicit, not relying on Qt's default: rules out any pixmap-cache
         # layer (device- or item-coordinate) as a source of stale-looking
         # geometry after rapid drag/property updates.
@@ -60,34 +50,26 @@ class OpticItem(pg.GraphicsObject):
 
     def sync_from_optic(self) -> None:
         """Full resync: rebuilds the surface polygon from the optic's
-        current shape fields, then repositions/rotates it. Call this after
-        any edit that could change shape (diameter/thickness/r1/r2), not on
-        every drag mouse-move — see `set_position()`."""
+        current shape fields, then repositions it. Call this after any edit
+        that could change shape (diameter/thickness/r1/r2), not on every
+        drag mouse-move — see `set_position()`. The model is strictly
+        axis-aligned (no transverse offset/tilt), so position is z-only."""
         self.prepareGeometryChange()
         self._build_polygon()
-        self.setPos(self.optic.z, self.optic.x)
-        self.setRotation(self.optic.angle_deg)
+        self.setPos(self.optic.z, 0.0)
         self.update()
 
-    def set_position(self, z: float, x: float) -> None:
+    def set_position(self, z: float) -> None:
         """Position-only update for drag moves: the optic's shape fields
         aren't touched by dragging, so this skips `prepareGeometryChange()`
         and the polygon rebuild `sync_from_optic()` does on every call --
         Qt's own item-move handling already invalidates the old/new scene
         regions for a plain `setPos()`, without needing to also declare a
         (here, unchanged) geometry change on every mouse-move."""
-        self.setPos(z, x)
+        self.setPos(z, 0.0)
 
-    def _build_polygon(self, n_samples: int = 48) -> None:
-        optic = self.optic
-        half_d = max(optic.diameter_full, 1e-6) / 2.0
-        xs = np.linspace(-half_d, half_d, n_samples)
-        front = _surface_z(xs, optic.r1, 0.0)
-        back = _surface_z(xs, optic.r2, optic.thickness_center)
-
-        pts = [QtCore.QPointF(float(z), float(x)) for z, x in zip(front, xs)]
-        pts += [QtCore.QPointF(float(z), float(x)) for z, x in zip(back[::-1], xs[::-1])]
-        self._polygon = QtGui.QPolygonF(pts)
+    def _build_polygon(self) -> None:
+        self._polygon = build_lens_polygon(self.optic)
         self._bounds = self._polygon.boundingRect()
 
     def boundingRect(self) -> QtCore.QRectF:
@@ -122,17 +104,23 @@ class OpticItem(pg.GraphicsObject):
         if view is None:
             return
         if ev.isStart():
-            self._press_optic_zx = (self.optic.z, self.optic.x)
+            self._press_optic_z = self.optic.z
             self._press_data_pos = view.mapSceneToView(ev.buttonDownScenePos())
             self.sigClicked.emit(self)
 
         data_pos = view.mapSceneToView(ev.scenePos())
         dz = data_pos.x() - self._press_data_pos.x()
-        dx = data_pos.y() - self._press_data_pos.y()
-        z0, x0 = self._press_optic_zx
-        new_z = z0 if self.optic.lock_z else z0 + dz
-        new_x = x0 if self.optic.lock_x else x0 + dx
-        self.sigDragged.emit(self, new_z, new_x)
+        new_z = self._press_optic_z if self.optic.lock_z else self._press_optic_z + dz
+        self.sigDragged.emit(self, new_z)
 
         if ev.isFinish():
             self.sigDragFinished.emit(self)
+
+    def hoverEnterEvent(self, ev) -> None:
+        self.sigHoverEnter.emit(self)
+
+    def hoverMoveEvent(self, ev) -> None:
+        self.sigHoverEnter.emit(self)
+
+    def hoverLeaveEvent(self, ev) -> None:
+        self.sigHoverLeave.emit(self)

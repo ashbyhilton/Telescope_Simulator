@@ -16,7 +16,6 @@ class InputBeamSpec:
     w_ref: float = 0.5  # mm, 1/e^2 radius at z_ref
     collimated: bool = True
     r_ref: Optional[float] = None  # mm, wavefront ROC at z_ref when not collimated
-    x_offset: float = 0.0  # mm, transverse offset of the beam axis
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -25,7 +24,6 @@ class InputBeamSpec:
             "w_ref": self.w_ref,
             "collimated": self.collimated,
             "r_ref": self.r_ref,
-            "x_offset": self.x_offset,
         }
 
     @classmethod
@@ -36,5 +34,4 @@ class InputBeamSpec:
             w_ref=d.get("w_ref", 0.5),
             collimated=d.get("collimated", True),
             r_ref=d.get("r_ref"),
-            x_offset=d.get("x_offset", 0.0),
         )

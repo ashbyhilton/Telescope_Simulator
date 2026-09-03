@@ -30,6 +30,20 @@ def _thin_biconvex(z: float) -> Optic:
     return Optic(name="L1", diameter_full=25.4, thickness_center=1e-4, r1=100.0, r2=-100.0, n=1.5, z=z)
 
 
+def _grouped_thin_lenses(z_front: float, gap: float):
+    """Two thin biconvex lenses tagged as one composite group, `gap` mm of
+    air between the first lens's back vertex and the second's front vertex."""
+    lens1 = _thin_biconvex(z=z_front)
+    lens1.name = "L1"
+    lens2 = Optic(
+        name="L2", diameter_full=25.4, thickness_center=1e-4, r1=100.0, r2=-100.0, n=1.5,
+        z=z_front + lens1.thickness_center + gap,
+    )
+    lens1.group_id = lens2.group_id = lens1.id
+    lens1.group_name = lens2.group_name = "Doublet"
+    return [lens1, lens2]
+
+
 def _beam_spec() -> InputBeamSpec:
     return InputBeamSpec(wavelength_nm=WAVELENGTH_NM, z_ref=0.0, w_ref=W0, collimated=True)
 
@@ -120,3 +134,47 @@ def test_infeasible_bounds_raises_unavailable():
 
     with pytest.raises(OptimizeUnavailable, match="No room"):
         optimize_for_flatness(_beam_spec(), [prev, governing], target_z=target_z, precision_mm=0.01)
+
+
+def test_optimize_moves_every_composite_member_by_the_same_delta():
+    """A composite lens must move as one rigid unit -- same delta for every
+    member, internal spacing preserved -- exactly like a canvas drag
+    (PlotView._on_item_dragged), not just the one sub-optic that happens to
+    be 'the optic before the target'."""
+    members = _grouped_thin_lenses(z_front=50.0, gap=5.0)
+    original_gap = members[1].z - (members[0].z + members[0].thickness_center)
+
+    result = optimize_for_flatness(_beam_spec(), members, target_z=500.0, precision_mm=0.01)
+
+    assert len(result.moved) == 2
+    moved_by_id = dict(result.moved)
+    delta0 = moved_by_id[members[0].id] - members[0].z
+    delta1 = moved_by_id[members[1].id] - members[1].z
+    assert delta0 == pytest.approx(delta1)
+    new_gap = moved_by_id[members[1].id] - (moved_by_id[members[0].id] + members[0].thickness_center)
+    assert new_gap == pytest.approx(original_gap)
+
+
+def test_optimize_unavailable_if_any_group_member_is_locked():
+    members = _grouped_thin_lenses(z_front=50.0, gap=5.0)
+    members[1].lock_z = True  # lock the *second* member, not the governing one
+    with pytest.raises(OptimizeUnavailable, match="locked"):
+        optimize_for_flatness(_beam_spec(), members, target_z=500.0, precision_mm=0.01)
+
+
+def test_optimize_bounds_use_full_group_span_not_one_members_thickness():
+    """Regression test: bounds used to be computed from the single governing
+    optic's own thickness_center, which for a composite would let the
+    search push the group's *other* members straight through a neighboring
+    optic since only one member's extent was accounted for."""
+    members = _grouped_thin_lenses(z_front=50.0, gap=5.0)
+    neighbor = Optic(name="Window", diameter_full=25.4, thickness_center=1.0, z=200.0)
+    target_z = 199.0
+
+    governing, reason = find_governing_optic(
+        members + [neighbor], beam_z_ref=0.0, target_z=target_z, separation_mm=0.01,
+    )
+    assert governing is not None
+    group_span = (members[1].z + members[1].thickness_center) - members[0].z
+    expected_upper = target_z - 0.01 - group_span
+    assert governing.bounds.upper == pytest.approx(expected_upper)

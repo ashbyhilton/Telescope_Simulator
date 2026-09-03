@@ -6,12 +6,49 @@ import pytest
 from pyqtgraph.Qt import QtWidgets
 
 from telescope_simulator.gui.tabs.optics_tab import OpticsTab
-from telescope_simulator.model.optics import OpticKind, describe_shape, make_default_optic
+from telescope_simulator.model.optics import Optic, OpticKind, make_default_optic
 
 
 @pytest.fixture(scope="module")
 def qapp():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+
+class _StubFields:
+    def __init__(self, apply_fn=None):
+        self._apply_fn = apply_fn or (lambda optic: None)
+
+    def apply(self, optic):
+        self._apply_fn(optic)
+
+
+class _StubSinglePage:
+    def __init__(self, apply_fn=None):
+        self.fields = _StubFields(apply_fn)
+
+
+class _StubAddDialog:
+    """Stands in for the real modal AddOpticDialog in tests -- exec()'ing a
+    real QDialog would block the test's event loop waiting for a click, so
+    OpticsTab's add/edit flow is tested against this pre-canned result
+    instead of driving the dialog's own widgets end-to-end."""
+
+    def __init__(self, optic=None, group=None, apply_fn=None):
+        self._optic = optic
+        self._group = group
+        self.single_page = _StubSinglePage(apply_fn)
+
+    def exec(self):
+        return QtWidgets.QDialog.DialogCode.Accepted
+
+    def is_composite(self) -> bool:
+        return self._group is not None
+
+    def result_optic(self):
+        return self._optic
+
+    def result_group(self):
+        return self._group
 
 
 def test_typing_zero_into_r1_does_not_stick_with_flat_unchecked(qapp):
@@ -73,34 +110,68 @@ def test_r2_spin_displays_positive_for_convex_back_surface(qapp):
     assert tab.r2_spin.value() == pytest.approx(50.0)
 
 
-def test_add_dropdown_offers_only_flat_plate_and_singlet_lens(qapp):
-    tab = OpticsTab()
-    labels = [tab.kind_combo.itemText(i) for i in range(tab.kind_combo.count())]
-    assert labels == ["Flat plate", "Singlet lens"]
-
-
-def test_add_singlet_lens_defaults_to_plano_convex_shape(qapp):
+def test_add_single_optic_appends_dialog_result(qapp, monkeypatch):
     tab = OpticsTab()
     tab.set_optics([])
-    tab.kind_combo.setCurrentIndex(tab.kind_combo.findText("Singlet lens"))
+    stub_optic = Optic(name="Custom Optic", diameter_full=10.0, r1=30.0, r2=float("inf"))
+    monkeypatch.setattr(
+        "telescope_simulator.gui.tabs.optics_tab.AddOpticDialog",
+        lambda parent=None, existing_group=None: _StubAddDialog(optic=stub_optic),
+    )
     tab._on_add_clicked()
 
-    assert len(tab.optics) == 1
-    optic = tab.optics[0]
-    assert optic.name == "Singlet Lens 1"
-    assert describe_shape(optic.r1, optic.r2) == "Plano-convex"
+    assert tab.optics == [stub_optic]
+    assert stub_optic.z == 10.0  # max(default=0.0) + 10.0, unchanged insertion rule
+    assert tab.list_widget.count() == 1
+    assert tab._selected_id == stub_optic.id
 
 
-def test_add_flat_plate_defaults_to_flat_window(qapp):
+def test_add_composite_group_appends_every_member_as_one_row(qapp, monkeypatch):
     tab = OpticsTab()
     tab.set_optics([])
-    tab.kind_combo.setCurrentIndex(tab.kind_combo.findText("Flat plate"))
+    m1 = Optic(name="Element 1", thickness_center=4.0, z=0.0)
+    m2 = Optic(name="Element 2", thickness_center=3.0, z=6.0)
+    m1.group_id = m2.group_id = m1.id
+    m1.group_name = m2.group_name = "Doublet"
+    monkeypatch.setattr(
+        "telescope_simulator.gui.tabs.optics_tab.AddOpticDialog",
+        lambda parent=None, existing_group=None: _StubAddDialog(group=[m1, m2]),
+    )
     tab._on_add_clicked()
 
-    assert len(tab.optics) == 1
-    optic = tab.optics[0]
-    assert optic.name == "Flat Plate 1"
-    assert describe_shape(optic.r1, optic.r2) == "Plano-plano (flat window)"
+    assert tab.optics == [m1, m2]
+    assert tab.list_widget.count() == 1  # one row for the whole group
+    assert m1.z == 10.0
+    assert m2.z == 16.0  # relative spacing (6.0) preserved under the insertion offset
+
+
+def test_composite_row_selection_shows_group_summary_not_form(qapp):
+    tab = OpticsTab()
+    m1 = Optic(name="Element 1", thickness_center=4.0, z=0.0)
+    m2 = Optic(name="Element 2", thickness_center=3.0, z=6.0)
+    m1.group_id = m2.group_id = m1.id
+    m1.group_name = m2.group_name = "Doublet"
+    tab.set_optics([m1, m2])
+
+    tab.select_optic(m1.id)
+
+    assert not tab.group_box.isHidden()
+    assert tab.form.isHidden()
+    assert "Element 1" in tab.group_members_label.text()
+    assert "Element 2" in tab.group_members_label.text()
+
+
+def test_removing_composite_row_removes_every_member(qapp):
+    tab = OpticsTab()
+    m1 = Optic(name="Element 1", thickness_center=4.0, z=0.0)
+    m2 = Optic(name="Element 2", thickness_center=3.0, z=6.0)
+    m1.group_id = m2.group_id = m1.id
+    tab.set_optics([m1, m2])
+    tab.select_optic(m1.id)
+
+    tab._on_remove_clicked()
+
+    assert tab.optics == []
 
 
 def test_bfl_matches_efl_in_thin_lens_limit(qapp):
@@ -124,3 +195,82 @@ def test_bfl_differs_from_efl_for_a_thick_lens(qapp):
 
     assert tab.bfl_label.text() != "-"
     assert tab.bfl_label.text() != tab.efl_label.text()
+
+
+def test_edit_single_lens_applies_dialog_fields_in_place(qapp, monkeypatch):
+    """'Edit lens...' must edit the existing Optic in place (same id/z),
+    not replace it -- matching how the inline form already edits it."""
+    tab = OpticsTab()
+    optic = make_default_optic(OpticKind.BICONVEX, "Lens 1", z=42.0)
+    tab.set_optics([optic])
+    tab.select_optic(optic.id)
+    original_id = optic.id
+
+    def apply_fn(o):
+        o.diameter_full = 30.0
+        o.name = "Renamed Lens"
+
+    monkeypatch.setattr(
+        "telescope_simulator.gui.tabs.optics_tab.AddOpticDialog",
+        lambda parent=None, existing_group=None, existing_single=None: _StubAddDialog(apply_fn=apply_fn),
+    )
+    tab._on_edit_single_clicked()
+
+    assert optic.id == original_id
+    assert optic.diameter_full == 30.0
+    assert optic.name == "Renamed Lens"
+    assert optic.z == 42.0
+    assert tab.list_widget.item(0).text() == "Renamed Lens"
+
+
+def test_group_z_spin_shifts_every_member_by_same_delta(qapp):
+    tab = OpticsTab()
+    m1 = Optic(name="E1", thickness_center=4.0, z=0.0)
+    m2 = Optic(name="E2", thickness_center=3.0, z=6.0)
+    m1.group_id = m2.group_id = m1.id
+    tab.set_optics([m1, m2])
+    tab.select_optic(m1.id)
+
+    tab.group_z_spin.setValue(50.0)
+
+    assert m1.z == pytest.approx(50.0)
+    assert m2.z == pytest.approx(56.0)  # 6.0 spacing preserved
+
+
+def test_group_lock_check_locks_every_member(qapp):
+    tab = OpticsTab()
+    m1 = Optic(name="E1", thickness_center=4.0, z=0.0)
+    m2 = Optic(name="E2", thickness_center=3.0, z=6.0)
+    m1.group_id = m2.group_id = m1.id
+    tab.set_optics([m1, m2])
+    tab.select_optic(m1.id)
+
+    tab.group_lock_check.setChecked(True)
+
+    assert m1.lock_z is True
+    assert m2.lock_z is True
+
+
+def test_group_efl_matches_independent_two_thin_lens_formula(qapp):
+    """Checked against the textbook two-thin-lens combined-focal-length
+    formula (1/f = 1/f1 + 1/f2 - d/(f1*f2)), not against this app's own
+    thick_lens()/propagation() re-composed a second way -- an independent
+    result, per this repo's testing convention."""
+    tab = OpticsTab()
+    n = 1.5168
+    r1a, r2a = 100.0, float("inf")
+    r1b, r2b = float("inf"), -100.0
+    gap = 50.0
+    thin = 1e-6
+    m1 = Optic(name="L1", thickness_center=thin, r1=r1a, r2=r2a, n=n, z=0.0)
+    m2 = Optic(name="L2", thickness_center=thin, r1=r1b, r2=r2b, n=n, z=thin + gap)
+    m1.group_id = m2.group_id = m1.id
+
+    f1 = 1.0 / ((n - 1.0) * (1.0 / r1a))
+    f2 = 1.0 / ((n - 1.0) * (1.0 / abs(r2b)))
+    inv_f_expected = 1.0 / f1 + 1.0 / f2 - gap / (f1 * f2)
+    f_expected = 1.0 / inv_f_expected
+
+    m = tab._composite_matrix([m1, m2])
+    power = -m[1, 0]
+    assert (1.0 / power) == pytest.approx(f_expected, rel=1e-3)

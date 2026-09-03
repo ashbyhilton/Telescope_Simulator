@@ -3,8 +3,14 @@ flatness"/"Optimise lens for focus" actions. Per the feature spec, the
 objective is assumed unimodal between the governing optic's current
 position and the true optimum -- a plain golden-section search is used
 instead of a global search. Every trial evaluates `OpticalSystem.propagate()`
-on a throwaway copy of the optics list (only the governing optic's `z`
-differs); this module never re-derives ABCD/q-parameter propagation.
+on a throwaway copy of the optics list (only the governing unit's member(s)
+`z` differ); this module never re-derives ABCD/q-parameter propagation.
+
+"Governing unit" -- a standalone optic, or (since composite lenses were
+added) an entire composite group moved together as one rigid block, exactly
+mirroring `PlotView._on_item_dragged`'s canvas-drag behavior: every member
+sharing the same `group_key` shifts by the same z delta, so a group's
+internal spacing is never disturbed by an optimize run.
 """
 from __future__ import annotations
 
@@ -13,8 +19,12 @@ from dataclasses import dataclass, replace
 from typing import Callable, List, Optional, Tuple
 
 from ..model.beam_spec import InputBeamSpec
-from ..model.optics import Optic
+from ..model.optics import Optic, group_key
 from .system import OpticalSystem, SystemResult, segment_covering
+
+
+def _display_name(optic: Optic) -> str:
+    return optic.group_name if optic.group_id is not None else optic.name
 
 _GOLDEN = (5.0 ** 0.5 - 1.0) / 2.0  # ~0.618
 
@@ -36,16 +46,19 @@ class FeasibleBounds:
 
 @dataclass
 class GoverningOptic:
-    index: int  # index into the z-sorted optics list
-    optic: Optic
-    bounds: FeasibleBounds
+    index: int  # index into sorted_optics of the representative (frontmost) member
+    optic: Optic  # the representative (frontmost) member -- for a standalone optic, itself
+    member_indices: List[int]  # indices into sorted_optics of every optic that moves together
+    bounds: FeasibleBounds  # feasible range for the representative member's own z
     sorted_optics: List[Optic]
 
 
 @dataclass
 class OptimizeResult:
-    optic_id: int
-    z: float
+    optic_id: int  # representative (frontmost) member's id
+    z: float  # representative member's new z
+    moved: List[Tuple[int, float]]  # (optic_id, new_z) for every optic that actually moved --
+    # all group members for a composite, or just [(optic_id, z)] for a standalone optic
     clamped: bool
     objective_value: float
     iterations: int
@@ -94,24 +107,34 @@ def find_governing_optic_index(optics_sorted: List[Optic], target_z: float) -> O
 
 
 def compute_feasible_bounds(
-    optics_sorted: List[Optic], index: int, beam_z_ref: float, target_z: float, separation_mm: float,
+    sorted_optics: List[Optic], member_indices: List[int], beam_z_ref: float, target_z: float, separation_mm: float,
 ) -> FeasibleBounds:
-    """Legal front-vertex z range for optics_sorted[index]: at least
-    `separation_mm` after the previous optic's back vertex (or the beam's
-    own z_ref if there is none), and at least `separation_mm` before
-    *whichever is closer* of the next optic's front vertex or target_z
-    itself -- so the governing lens's back surface can never cross either."""
-    governing = optics_sorted[index]
-    if index > 0:
-        prev = optics_sorted[index - 1]
+    """Legal front-vertex z range for the *anchor* (frontmost member,
+    `member_indices[0]`) of the governing unit -- a standalone optic, or
+    every member of a composite group shifted together as one rigid block.
+    At least `separation_mm` after the previous non-member optic's back
+    vertex (or the beam's own z_ref if there is none), and at least
+    `separation_mm` before *whichever is closer* of the next non-member
+    optic's front vertex or target_z itself -- so the block's rear can never
+    cross either. Assumes `member_indices` are contiguous in z-order, true
+    for any group as actually created/edited/dragged (see
+    PlotView._on_item_dragged and the Add-optic dialog's chained layout)."""
+    first_idx = member_indices[0]
+    last_idx = member_indices[-1]
+    group_front = sorted_optics[first_idx].z
+    group_back = max(sorted_optics[i].z + sorted_optics[i].thickness_center for i in member_indices)
+    group_span = group_back - group_front
+
+    if first_idx > 0:
+        prev = sorted_optics[first_idx - 1]
         lower = prev.z + prev.thickness_center + separation_mm
     else:
         lower = beam_z_ref
-    if index + 1 < len(optics_sorted):
-        surface_limit = min(optics_sorted[index + 1].z, target_z)
+    if last_idx + 1 < len(sorted_optics):
+        surface_limit = min(sorted_optics[last_idx + 1].z, target_z)
     else:
         surface_limit = target_z
-    upper = surface_limit - separation_mm - governing.thickness_center
+    upper = surface_limit - separation_mm - group_span
     return FeasibleBounds(lower=lower, upper=upper)
 
 
@@ -127,15 +150,22 @@ def find_governing_optic(
     if idx is None:
         return None, "No optic precedes the target location."
     optic = sorted_optics[idx]
-    if optic.lock_z:
-        return None, f"'{optic.name}' governs this target but its z position is locked."
-    bounds = compute_feasible_bounds(sorted_optics, idx, beam_z_ref, target_z, separation_mm)
+    key = group_key(optic)
+    member_indices = [i for i, o in enumerate(sorted_optics) if group_key(o) == key]
+    if any(sorted_optics[i].lock_z for i in member_indices):
+        return None, f"'{_display_name(optic)}' governs this target but its z position is locked."
+    representative_index = member_indices[0]
+    representative = sorted_optics[representative_index]
+    bounds = compute_feasible_bounds(sorted_optics, member_indices, beam_z_ref, target_z, separation_mm)
     if not bounds.feasible:
         return None, (
-            f"No room to move '{optic.name}' without crossing a neighboring lens "
-            f"or the target location."
+            f"No room to move '{_display_name(representative)}' without crossing a neighboring "
+            f"lens or the target location."
         )
-    return GoverningOptic(index=idx, optic=optic, bounds=bounds, sorted_optics=sorted_optics), ""
+    return GoverningOptic(
+        index=representative_index, optic=representative, member_indices=member_indices,
+        bounds=bounds, sorted_optics=sorted_optics,
+    ), ""
 
 
 def _flatness_objective(result: SystemResult, target_z: float) -> float:
@@ -159,13 +189,22 @@ def _optimize(
         raise OptimizeUnavailable(reason)
 
     sorted_optics = governing.sorted_optics
-    optic = governing.optic
-    thickness = optic.thickness_center
+    optic = governing.optic  # representative (frontmost) member
+    member_indices = governing.member_indices
+    original_front_z = optic.z
+    # Group span (front vertex of the frontmost member to the back vertex of
+    # whichever member extends furthest): the multi-member generalization of
+    # "the governing optic's own thickness" used below for trailing padding
+    # -- reduces to exactly the old single-optic behavior when there's only
+    # one member.
+    group_span = max(sorted_optics[i].z + sorted_optics[i].thickness_center for i in member_indices) - original_front_z
 
-    def trial(z: float) -> float:
+    def trial(anchor_z: float) -> float:
+        delta = anchor_z - original_front_z
         trial_optics = list(sorted_optics)
-        trial_optics[governing.index] = replace(optic, z=z)
-        trailing = max(target_z - z - thickness, 0.0) + 1.0
+        for i in member_indices:
+            trial_optics[i] = replace(sorted_optics[i], z=sorted_optics[i].z + delta)
+        trailing = max(target_z - anchor_z - group_span, 0.0) + 1.0
         try:
             result = OpticalSystem(beam_spec, trial_optics).propagate(trailing_length=trailing)
         except ValueError:
@@ -177,7 +216,7 @@ def _optimize(
     )
     if math.isinf(best_val):
         raise OptimizeUnavailable(
-            f"Could not find a valid position for '{optic.name}' in the available range."
+            f"Could not find a valid position for '{_display_name(optic)}' in the available range."
         )
 
     dist_lower = abs(best_z - governing.bounds.lower)
@@ -196,9 +235,13 @@ def _optimize(
     else:
         final_z = best_z
 
+    final_delta = float(final_z) - original_front_z
+    moved = [(sorted_optics[i].id, sorted_optics[i].z + final_delta) for i in member_indices]
+
     return OptimizeResult(
         optic_id=optic.id,
         z=float(final_z),
+        moved=moved,
         clamped=near_lower or near_upper,
         objective_value=float(best_val),
         iterations=iterations,

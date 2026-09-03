@@ -89,20 +89,13 @@ class BeamTab(QtWidgets.QWidget):
         self.r_ref_spin.setSuffix(" mm")
         self.r_ref_spin.setToolTip("Measured wavefront radius of curvature at z_ref (only used when not collimated).")
 
-        self.x_offset_spin = QtWidgets.QDoubleSpinBox()
-        self.x_offset_spin.setRange(-1.0e6, 1.0e6)
-        self.x_offset_spin.setDecimals(4)
-        self.x_offset_spin.setSuffix(" mm")
-
         form.addRow("Diameter (1/e²) at z_ref", self.diameter_spin)
         form.addRow("z_ref", self.z_ref_spin)
         form.addRow("Wavelength", self.wavelength_spin)
         form.addRow(self.collimated_check)
         form.addRow("Wavefront ROC at z_ref", self.r_ref_spin)
-        form.addRow("x offset", self.x_offset_spin)
 
-        for w in (self.diameter_spin, self.z_ref_spin, self.wavelength_spin,
-                  self.r_ref_spin, self.x_offset_spin):
+        for w in (self.diameter_spin, self.z_ref_spin, self.wavelength_spin, self.r_ref_spin):
             w.valueChanged.connect(self._on_changed)
         self.collimated_check.toggled.connect(self._on_collimated_toggled)
 
@@ -229,17 +222,28 @@ class BeamTab(QtWidgets.QWidget):
     # -- input form <-> model -------------------------------------------------
     def _on_collimated_toggled(self, checked: bool) -> None:
         self.r_ref_spin.setEnabled(not checked)
+        if not checked and self.r_ref_spin.value() == 0.0:
+            self.r_ref_spin.setValue(1000.0)
         self._on_changed()
 
     def _on_changed(self, *_args) -> None:
         if self._updating:
+            return
+        # A user can type 0 directly into r_ref_spin without touching the
+        # "Collimated" checkbox, bypassing the repair its own toggled handler
+        # does -- apply the same repair here so beam.r_ref can never become
+        # 0.0 while not collimated, regardless of entry path (same pattern as
+        # optics_tab.py's ROC-repair on the R1/R2 spinboxes). setValue()
+        # re-enters this handler, which finishes the write with the repaired
+        # value.
+        if not self.collimated_check.isChecked() and self.r_ref_spin.value() == 0.0:
+            self.r_ref_spin.setValue(1000.0)
             return
         self.beam.w_ref = self.diameter_spin.value() / 2.0
         self.beam.z_ref = self.z_ref_spin.value()
         self.beam.wavelength_nm = self.wavelength_spin.value()
         self.beam.collimated = self.collimated_check.isChecked()
         self.beam.r_ref = None if self.beam.collimated else self.r_ref_spin.value()
-        self.beam.x_offset = self.x_offset_spin.value()
         self._update_input_characteristics()
         self.beamChanged.emit(self.beam)
 
@@ -252,16 +256,25 @@ class BeamTab(QtWidgets.QWidget):
         self.collimated_check.setChecked(beam.collimated)
         self.r_ref_spin.setEnabled(not beam.collimated)
         self.r_ref_spin.setValue(beam.r_ref if beam.r_ref is not None else 0.0)
-        self.x_offset_spin.setValue(beam.x_offset)
         self._updating = False
         self._update_input_characteristics()
 
     def _update_input_characteristics(self) -> None:
-        r_ref = None if self.beam.collimated else self.beam.r_ref
-        beam = GaussianBeam.from_measurement(
-            z_ref=self.beam.z_ref, w_ref=self.beam.w_ref, wavelength_nm=self.beam.wavelength_nm,
-            n=1.0, r_ref=r_ref,
-        )
+        # Display-only: wrapped defensively so a failure here (e.g. an
+        # invalid r_ref slipping through) can never prevent a caller's
+        # subsequent beamChanged.emit() from firing -- see README's Round 1
+        # "Lessons learned" note for why this class of bug is dangerous in a
+        # notify-then-resync codebase.
+        try:
+            r_ref = None if self.beam.collimated else self.beam.r_ref
+            beam = GaussianBeam.from_measurement(
+                z_ref=self.beam.z_ref, w_ref=self.beam.w_ref, wavelength_nm=self.beam.wavelength_nm,
+                n=1.0, r_ref=r_ref,
+            )
+        except (ValueError, ZeroDivisionError):
+            for label in self._input_labels.values():
+                label.setText("-")
+            return
         values = _format_common(beam.rayleigh_range, beam.q_ref, beam.divergence_half_angle, beam.z_waist, 2.0 * beam.w0)
         for key, text in values.items():
             self._input_labels[key].setText(text)

@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from telescope_simulator.physics.beam import GaussianBeam
 
@@ -43,3 +44,12 @@ def test_divergence_half_angle_far_field():
     beam = GaussianBeam.from_measurement(z_ref=0.0, w_ref=0.2, wavelength_nm=632.8, n=1.0, r_ref=None)
     expected = (632.8e-6) / (np.pi * 0.2)
     assert np.isclose(beam.divergence_half_angle, expected, rtol=1e-9)
+
+
+def test_zero_r_ref_raises_clear_value_error_not_zero_division_error():
+    # r_ref=0.0 is a mathematical singularity (a zero-radius wavefront has no
+    # physical meaning) -- must fail loudly and specifically at the source,
+    # same precedent as physics/matrices.interface()'s radius==0 check, not
+    # leak a bare ZeroDivisionError that callers won't be catching.
+    with pytest.raises(ValueError):
+        GaussianBeam.from_measurement(z_ref=0.0, w_ref=0.5, wavelength_nm=632.8, n=1.0, r_ref=0.0)

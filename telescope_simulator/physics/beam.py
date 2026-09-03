@@ -87,6 +87,11 @@ class GaussianBeam:
         lam = wavelength_nm * 1e-6
         if r_ref is None or np.isinf(r_ref):
             inv_r = 0.0
+        elif r_ref == 0.0:
+            raise ValueError(
+                "wavefront radius of curvature (r_ref) cannot be exactly 0 -- "
+                "use collimated=True (r_ref=None) for a flat wavefront instead"
+            )
         else:
             inv_r = 1.0 / r_ref
         inv_q = inv_r - 1j * lam / (n * np.pi * w_ref**2)

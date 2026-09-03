@@ -7,7 +7,7 @@ a guide for whoever (human or AI) picks up development next: why the tool is sha
 way it is, the physics it implements, how the code is organized, and the traps we
 already found and fixed.
 
-Current version: **v1.1** (see `TODO.md` for the active worklist).
+Current version: **v1.2** (see `TODO.md` for the active worklist).
 
 ## Quick start
 
@@ -245,15 +245,23 @@ telescope_simulator/
     main_window.py    # QMainWindow; the *only* place that wires tabs <-> plot_view
     plot_view.py      # interactive x-z canvas (pg.PlotWidget subclass)
     optic_item.py     # one draggable pg.GraphicsObject per Optic (true lens sag shape)
+    lens_geometry.py  # build_lens_polygon(optic): the sag-shape polygon math, shared by
+                       # optic_item.py's canvas rendering and the Add-optic dialog's preview
+    widget_utils.py   # mm_spin()/wrap_row() shared by optics_tab.py and the dialog below
     color_utils.py    # wavelength -> RGB approximation
     mm_axis.py        # custom pg.AxisItem: um/mm/m/km unit-aware tick labels
     theme.py          # light/dark Qt palette + pyqtgraph background switching
     app_settings.py   # tiny app-level prefs file (currently just dark_mode), NOT
                        # part of Project — deliberately independent of any saved file
+    dialogs/
+      add_optic_dialog.py  # "Add optic" popup (single optic / composite group modes),
+                            # live construction-diagram preview, edge/center-thickness
+                            # coupling -- the first QDialog in this codebase
     tabs/
       beam_tab.py      # input beam form + input/output/target characteristics panels
-      optics_tab.py    # optics list, property form, EFL readout
-      config_tab.py    # view/aspect/annotation/color/dark-mode/about settings
+      optics_tab.py    # optics list (one row per optic or composite group),
+                        # property form / group summary, EFL readout
+      config_tab.py    # view/aspect/annotation/dark-mode/about settings
       fit_data_tab.py  # measured (z, diameter) table + "fit input beam" button
   tests/          # pytest; physics + a few pure-function GUI utilities (color_utils)
 version.py        # hardcoded APP_VERSION/APP_BUILD_DATE/APP_AUTHOR/APP_ORGANISATION,
@@ -325,19 +333,19 @@ half-fixed without addressing the whole thing:
 - Single wavelength, no dispersion (constant refractive index per optic, no glass
   catalog).
 - Ambient index fixed at 1.0 (air) between/around all optics.
-- Tilt (`Optic.angle_deg`) rotates the rendering and would affect a future clear-aperture
-  projection, but does **not** induce astigmatism in the beam physics — there is
-  intentionally only one `q` per segment (not separate tangential/sagittal), consistent
-  with normal-incidence propagation.
+- Strictly axis-aligned as of v1.2 — there is no transverse offset or tilt anywhere in
+  the model (`InputBeamSpec.x_offset` and `Optic.x`/`angle_deg` were removed outright,
+  not just hidden). There is intentionally only one `q` per segment (not separate
+  tangential/sagittal), consistent with normal-incidence propagation.
 - No aperture clipping/vignetting — the beam envelope is drawn regardless of whether it
   exceeds an optic's clear aperture.
 - Positions are global-coordinate: an `Optic.z` is its **front-surface vertex**
   position, not "distance from the previous element."
 
-If any of these get lifted (e.g. adding real tilt-induced astigmatism), expect it to
-require carrying two `q` parameters per segment instead of one — a genuinely bigger
-change than it sounds, not a one-line tweak, since `BeamSegment`/`SystemResult` and
-every consumer of `.w(z)` currently assume a single scalar beam radius.
+If tilt-induced astigmatism is ever reintroduced, expect it to require carrying two `q`
+parameters per segment instead of one — a genuinely bigger change than it sounds, not a
+one-line tweak, since `BeamSegment`/`SystemResult` and every consumer of `.w(z)`
+currently assume a single scalar beam radius.
 
 ## Lessons learned (read before touching signal-heavy code)
 
@@ -605,6 +613,109 @@ build system in this repo to derive them from, and the user preferred that
 over a git-derived runtime lookup (which would break if ever run from a copy
 without `.git`). Bump `version.py` by hand each release, the same way
 `README.md`'s and `TODO.md`'s "Current version" lines already are.
+
+### Round 7 (v1.2): axis-aligned-only, Add-optic dialog, hover overlay, composite lenses
+
+**Axis-aligned only.** `InputBeamSpec.x_offset` and `Optic.x`/`angle_deg`/`lock_x`/
+`lock_angle` were removed outright, not just hidden — every optic and the beam now sit
+on the z-axis. This simplified more than it broke: `OpticItem.sync_from_optic()` no
+longer needs `setRotation()`, drag deltas collapse from `(dz, dx)` to just `dz`, and
+`PlotView.refresh()`'s beam-curve/waist-marker/axis-line rendering all collapsed from
+"shift by `x_offset`" to "no shift" (the beam is always centered on `x=0`). The signal
+chain (`OpticItem.sigDragged`, `PlotView.opticMoved`, `OpticsTab.update_optic_position`)
+lost its `x` parameter entirely rather than always passing `0.0` — a real removal, not a
+stub.
+
+**Add-optic dialog, and where its geometry math lives.** The old kind-preset dropdown
+(`_ADD_PRESETS`) is gone; `gui/dialogs/add_optic_dialog.py`'s `AddOpticDialog` is the
+first `QDialog` in this codebase. Its live construction-diagram preview reuses
+`gui/lens_geometry.py`'s `build_lens_polygon()` — extracted from what used to be
+`OpticItem._build_polygon()`'s private `_surface_z()` — so the dialog's preview and the
+main canvas draw the *exact* same sag geometry, not two copies that could drift. The
+edge/center-thickness coupling (`model/optics.py`'s `surface_sag`/
+`edge_thickness_from_center`/`center_thickness_from_edge`) lives in the model layer, not
+the dialog, since it's pure geometry with no Qt dependency — `edge = center +
+sag(r2, half_diameter) - sag(r1, half_diameter)`, with `sag() == 0` for a flat surface
+per the confirmed "flat contributes no sag" rule, and the inverse (solving for center
+given edge) needs no iteration since it's linear in the thickness term.
+
+**Composite lenses are two new `Optic` fields, not a new data model.** The instinct
+might be a `CompositeLens` wrapper class holding a list of `Optic`s — but that would have
+required teaching `physics/system.py`, `Project`'s (de)serialization, and `PlotView`'s
+per-id `OpticItem` rendering all to understand a second element type. Instead,
+`Optic.group_id`/`group_name` just tag several ordinary `Optic` instances (the group's id
+is simply its first member's own `id` — no new counter needed) as one rigid unit; a
+composite is physically nothing more than N real optics at consecutive `z` with real air
+gaps, which `OpticalSystem.propagate()` already handles with zero changes. The only
+places that needed to learn about grouping at all: `model.optics.group_key()` (an
+optic's own id if standalone, else its group's id — used everywhere a UI needs to key on
+"this optic or its group"), `OpticsTab` (one list row per group, via `group_key`, with a
+read-only summary + "Edit..." that reopens the dialog instead of an inline form),
+and `PlotView._on_item_dragged` (shifts every same-`group_key` sibling by the same delta
+so a drag can't desync a group's internal spacing).
+
+**Known gap, not addressed this round**: the "optimise lens for flatness/focus" buttons
+(`physics/optimize.py`, wired through `MainWindow._run_optimize`) move a single governing
+optic's `z` directly and don't know about `group_id` — if the governing optic happens to
+be a composite member, optimizing it will desync that group's spacing rather than moving
+the whole group. This wasn't part of the v1.2 ask; flagged in `main_window.py` and here
+so it isn't "discovered" and silently worked around later without addressing the whole
+thing, consistent with how this file has always documented known gaps (see Round 3's
+intro).
+
+### Round 8 (v1.2 fix round): a beam_tab crash that looked like a composite-lens bug
+
+A user report — "MAJOR ERROR: moving the composite lens does not impact the beam model"
+— could not be reproduced directly: dragging a composite (via both direct method calls
+and a fully simulated real mouse press/move/release on curved elements) correctly moved
+every member and re-propagated the beam every time. The actual cause, found from an
+attached traceback, was **in `beam_tab.py`, not the composite-lens code at all**:
+unchecking "Collimated" leaves `r_ref_spin` at its default `0.0`; `_on_changed()` writes
+`beam.r_ref = 0.0` and calls `_update_input_characteristics()`, which calls
+`GaussianBeam.from_measurement(..., r_ref=0.0, ...)` — `physics/beam.py` divided by
+`r_ref` unguarded, raising `ZeroDivisionError`, and this happened *before*
+`self.beamChanged.emit(self.beam)` in the same method. This is the exact bug shape
+"Lessons learned" Round 1 already documented and fixed once, for `optics_tab.py`'s EFL
+label — a display-only computation sitting before a signal emit, with PySide6 silently
+swallowing the exception — it just hadn't been applied to `beam_tab.py`.
+
+What made it look composite-specific: once `beam.r_ref` is poisoned at `0.0`,
+`physics/system.py`'s `OpticalSystem.propagate()` hits the *same* division on every
+subsequent call — including from `PlotView.refresh()` and
+`MainWindow._refresh_output_readouts()`, both of which only `except ValueError`, not
+`ZeroDivisionError`. So from that point on, *every* refresh (a composite drag's
+included) silently no-ops app-wide, not just composite-related ones — the user's next
+action just happened to be dragging a composite lens.
+
+**Fixes applied**, following the exact Round-1 precedent rather than inventing a new
+pattern: `physics/beam.py`'s `from_measurement()` now raises a clear `ValueError` for
+`r_ref == 0.0` (matching `physics/matrices.interface()`'s existing `radius == 0` check)
+— this alone makes it consistently catchable by the `except ValueError` clauses already
+in place elsewhere. `beam_tab.py`'s `_on_collimated_toggled`/`_on_changed` snap
+`r_ref_spin` away from `0.0` on both the checkbox-toggle and direct-typing entry paths
+(the same repair `optics_tab.py`'s ROC "Flat" checkboxes already do), and
+`_update_input_characteristics()` is now wrapped in `try/except` so a future failure
+there can never again block the critical `beamChanged.emit()`. **Lesson, restated**:
+this is the second time this exact bug shape has bitten this codebase in two different
+tabs — any new read-only/derived-display computation added to a property-change handler
+needs the same defensive treatment (wrap it, or put it after the signal emit) on sight,
+not just when a bug report eventually traces back to it.
+
+Also fixed this round: the Add-optic dialog's live preview never got `theme.py`'s
+dark-mode background/axis-pen treatment (it's a fresh `pg.PlotWidget` per dialog open,
+and `apply_theme()` only ever restyles the *main* canvas) — `pg.PlotWidget`'s background
+follows the app-wide `QPalette` when not explicitly set, so dark mode left the preview
+dark-background-but-light-mode-tuned-text. Fixed by detecting the app palette's
+lightness once at construction (safe since the dialog is modal). An "Edit lens..."
+button was added to the singlet Properties form (parity with the composite's existing
+"Edit...", edits the same `Optic` in place — confirmed with the user, not a
+replace-with-new-id flow like the composite side uses). The composite summary panel
+gained a `z`/lock field (rigidly shifts every member by the same delta, mirroring a
+canvas drag) and EFL/BFL (composed from each member's `thick_lens()` matrix folded with
+`propagation()` for the inter-element gaps, in z-order — the same composition
+`thick_lens()` already does internally for one lens, just extended across a chain;
+verified against the independent two-thin-lens combined-focal-length formula, not
+against this app's own matrix code a second time).
 
 ## Testing approach
 
