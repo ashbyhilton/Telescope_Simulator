@@ -1,60 +1,57 @@
 {
   "beam": {
     "wavelength_nm": 556.0,
-    "z_ref": -25.0,
-    "w_ref": 0.5,
+    "z_ref": 0.0,
+    "w_ref": 5.0,
     "collimated": true,
-    "r_ref": null,
-    "x_offset": 0.0
+    "r_ref": null
   },
   "optics": [
     {
       "id": 1,
-      "name": "L1",
+      "name": "Biconvex Lens 1",
       "kind": "biconvex",
       "diameter_full": 25.4,
-      "thickness_center": 5.3,
-      "r1": 25.8,
+      "thickness_center": 3.5,
+      "r1": -25.7,
       "r2": Infinity,
       "n": 1.5182,
-      "z": 0.0,
-      "x": 0.0,
-      "angle_deg": 0.0,
-      "lock_z": true,
-      "lock_x": true,
-      "lock_angle": true
+      "z": 20.0,
+      "lock_z": false,
+      "group_id": null,
+      "group_name": ""
     },
     {
-      "id": 2,
-      "name": "L2",
-      "kind": "plano-convex",
+      "id": 33,
+      "name": "LA1608-A",
+      "kind": "custom",
       "diameter_full": 25.4,
-      "thickness_center": 5.3,
+      "thickness_center": 4.1,
       "r1": Infinity,
-      "r2": -25.8,
+      "r2": -38.6,
       "n": 1.5182,
-      "z": 97.86279318271039,
-      "x": 0.0,
-      "angle_deg": 0.0,
+      "z": 42.7,
       "lock_z": false,
-      "lock_x": true,
-      "lock_angle": true
+      "group_id": null,
+      "group_name": ""
     }
   ],
   "config": {
     "plot_leading_padding_mm": 20.0,
     "plot_trailing_padding_zr_multiple": 3.0,
-    "plot_trailing_padding_min_mm": 100.0,
+    "plot_trailing_padding_min_mm": 20.0,
     "beam_curve_points_per_segment": 200,
     "show_waist_markers": true,
     "show_rayleigh_shading": false,
     "lock_aspect_ratio": true,
-    "aspect_ratio": 0.15,
-    "z_range_min": 0.0,
-    "z_range_max": 100.0,
+    "aspect_ratio": 0.3,
+    "z_range_min": null,
+    "z_range_max": null,
     "x_range_min": null,
     "x_range_max": null,
-    "color_by_wavelength": true
+    "raytrace_enabled": true,
+    "ambient_index": 1.0,
+    "raytrace_ray_count": 21
   },
   "fit_data_points": [
     {

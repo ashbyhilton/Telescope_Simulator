@@ -54,18 +54,20 @@ class OpticalSystem:
     """Chains ABCD propagation through an input beam and an ordered list of
     thick lenses, sorted by their front-surface z position."""
 
-    def __init__(self, beam_spec: InputBeamSpec, optics: List[Optic]):
+    def __init__(self, beam_spec: InputBeamSpec, optics: List[Optic], ambient_index: float = 1.0):
         self.beam_spec = beam_spec
         self.optics = sorted(optics, key=lambda o: o.z)
+        self.ambient_index = ambient_index
 
     def propagate(self, trailing_length: Optional[float] = None) -> SystemResult:
         lam_nm = self.beam_spec.wavelength_nm
+        n_ambient = self.ambient_index
         r_ref = None if self.beam_spec.collimated else self.beam_spec.r_ref
         beam = GaussianBeam.from_measurement(
             z_ref=self.beam_spec.z_ref,
             w_ref=self.beam_spec.w_ref,
             wavelength_nm=lam_nm,
-            n=1.0,
+            n=n_ambient,
             r_ref=r_ref,
         )
 
@@ -83,14 +85,14 @@ class OpticalSystem:
                 segments.append(BeamSegment(beam=beam, z_start=z_cursor, z_end=optic.z, label="air gap"))
 
             q_at_front = beam.q_at(optic.z)
-            q_inside = transform_q(q_at_front, interface(1.0, optic.n, optic.r1))
+            q_inside = transform_q(q_at_front, interface(n_ambient, optic.n, optic.r1))
             beam_inside = GaussianBeam(z_ref=optic.z, q_ref=q_inside, wavelength_nm=lam_nm, n=optic.n)
             z_back = optic.z + optic.thickness_center
             segments.append(BeamSegment(beam=beam_inside, z_start=optic.z, z_end=z_back, label=optic.name))
 
             q_at_back_inside = beam_inside.q_at(z_back)
-            q_after = transform_q(q_at_back_inside, interface(optic.n, 1.0, optic.r2))
-            beam = GaussianBeam(z_ref=z_back, q_ref=q_after, wavelength_nm=lam_nm, n=1.0)
+            q_after = transform_q(q_at_back_inside, interface(optic.n, n_ambient, optic.r2))
+            beam = GaussianBeam(z_ref=z_back, q_ref=q_after, wavelength_nm=lam_nm, n=n_ambient)
             z_cursor = z_back
             last_surface_z = z_back
 

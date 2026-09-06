@@ -7,7 +7,7 @@ a guide for whoever (human or AI) picks up development next: why the tool is sha
 way it is, the physics it implements, how the code is organized, and the traps we
 already found and fixed.
 
-Current version: **v1.2** (see `TODO.md` for the active worklist).
+Current version: **v2.0** (see `TODO.md` for the active worklist).
 
 ## Quick start
 
@@ -220,6 +220,171 @@ If you add new physics, add a test that checks it against an *independently deri
 result (a known limit, a textbook formula, a symmetry argument) — checking a formula
 against itself just re-confirms you can transcribe your own algebra correctly.
 
+### Real ray tracing / spherical aberration (v2.0)
+
+`physics/raytrace.py`, `physics/zernike.py`, and `physics/diffraction.py` add an optional
+(Config tab, off by default) *geometric* ray-tracing model alongside the Gaussian/ABCD one
+above -- real Snell's-law refraction through the same optics, for understanding spherical
+aberration, which a paraxial Gaussian beam model cannot represent at all. See "Round 9"
+under "Lessons learned" for the full reasoning; the short version:
+
+- The app is strictly axis-aligned with no tilt/decenter (v1.2), so the whole problem is
+  rotationally symmetric about z. A ray's optical path length depends only on its pupil
+  radius, never azimuth, so a single 2D **meridional ray fan** (`physics/raytrace.py`)
+  fully characterizes the system — no 3D skew-ray tracing needed. This one fact is why the
+  new engine is a few hundred lines instead of a full lens-design tool.
+- Only the rotationally-symmetric ("m=0") Zernike terms — piston, defocus, primary/
+  secondary/tertiary spherical aberration — can ever be non-zero; every other standard term
+  (coma, astigmatism, trefoil, ...) is *exactly* zero by the symmetry argument, not just
+  small. `physics/zernike.py` fits only those terms, directly against the real (rho, OPD)
+  samples (pooling both the +rho and -rho branches of the fan) — it deliberately does not
+  fabricate synthetic azimuth samples to "fill out" a full 2D fit; see that module's
+  docstring for why an earlier draft of this idea was rejected during implementation.
+- **The wavefront is referenced to a sphere centred on the target point, not to the target
+  plane.** `wavefront_at()` originally reported the optical path difference measured at the
+  target *plane*, referenced to the axial ray there. That quantity is easy to compute, and
+  it is exactly right at best focus — where every ray is at `r = 0` and the two references
+  coincide — which is precisely what made the difference so easy to miss. Away from focus
+  they differ by a defocus term in the ratio (distance to target)/(distance to focus), and
+  it is the sphere-referenced one that is the pupil phase a Fraunhofer propagation needs.
+  A PSF built on the plane-referenced OPD came out steadily too wide with defocus — a factor
+  of two by ten Rayleigh ranges out, while still drawing a perfectly plausible pattern the
+  whole way. The conversion is `W = OPD_plane + n*(xi^2 - (r - xi)^2)/(2L)` for a ray leaving
+  the exit plane at height `xi` and landing at `r` a distance `L` downstream: the first term
+  removes the pupil-to-plane path the OPD picked up, the second adds the Fresnel kernel's own
+  quadratic. Both vanish at focus. A target at or in front of the exit plane has no such
+  reference sphere, so the plane-referenced OPD is reported there instead (nothing diffracts
+  from it — `psf_radial_profile` refuses that case outright).
+- **"RMS wavefront error" is the wavefront, not the fit residual.** `ZernikeFitResult.rms_mm`
+  is the area-weighted RMS of the fitted wavefront over the pupil with piston removed —
+  computed from the coefficients via the orthonormal (Noll) rescaling `sqrt(n+1)`, which is
+  both cheaper than integrating and independent of how the fan happens to be sampled (the
+  samples are uniform in radius, so averaging them directly would weight the pupil centre
+  far too heavily). It briefly held the *fit residual* instead, which meant a system with 25
+  waves peak-to-valley advertised an RMS of 1e-8 waves: five m=0 terms describe a smooth
+  traced wavefront almost exactly, so the residual is always tiny and always looks perfect.
+  The residual is still reported, under its own name, as the diagnostic it actually is.
+- Total internal reflection stops a ray at the TIR surface (no reflected-path modeling —
+  that would make this a non-sequential tracer, a much bigger undertaking). A ray whose
+  surface intersection falls outside that optic's clear aperture is vignetted and stops at
+  that optic's z, per spec — this is the *first* place aperture clipping appears anywhere
+  in this app; the Gaussian/ABCD model still never clips, unchanged.
+- **Surfaces in contact** (`SURFACE_CONTACT_TOL_MM`) — a cemented doublet, or any composite
+  group laid out with zero spacing — need two things that a sequential tracer does not get
+  for free. First, the ray is then *already sitting on* the surface it is about to meet,
+  because the previous element's back surface and this one's front surface are the same
+  sphere: the intersection parameter comes out at exactly `0`, and a `t > 1e-9` "forward
+  only" filter discards it, stopping every ray in the fan — the axial one included — at the
+  joint. Nothing there needs protecting against re-finding the surface just left; the trace
+  is strictly sequential (front, back, next front) and never asks for the same surface
+  twice, so the filter is `t >= 0` (with a picometre of slack for float noise). Second, a
+  zero gap is a cemented joint, not an infinitesimally thin sliver of air, so the back
+  surface refracts straight into the next glass. Snell's law composes — `n1 sin1 =
+  n_air sin_air = n2 sin2` — so the ray direction is identical either way and this changes
+  nothing in the ordinary case; what it removes is the detour's ability to
+  total-internally-reflect. A 1.85-index element at 44° on the joint is well past the 32.7°
+  critical angle for glass-to-air and nowhere near the 76.7° for glass-to-glass, so routing
+  it through the ambient index stopped it dead at a surface that does not physically exist.
+  The ABCD model has always composed this correctly (`interface(nA,1,R)·interface(1,nB,R)`
+  is algebraically `interface(nA,nB,R)`) and has no TIR to get wrong, which is why the two
+  models disagreed here and only the ray tracer was visibly broken.
+- `physics/diffraction.py`'s PSF is a plain zero-padded `numpy.fft.fft2` of the aberrated,
+  rotationally-symmetric pupil, propagated from the fan's **exit plane** (the last optic's
+  back vertex, `RayFanResult.exit_plane_z`) over the ray bundle's measured half-width there
+  (`WavefrontSample.exit_pupil_radius_mm`) — *not* from the input beam's `z_ref` over the
+  fan's launched half-width, which is a plane upstream of every optic and gets the f-number,
+  and so the reported Airy null, several times wrong. The approximation that remains is that
+  the fitted `W(rho)`, parameterized by *launch* height, is evaluated as if `rho` were the
+  exit-pupil coordinate; the two differ only by pupil distortion, which is small for the
+  on-axis systems this app models. Still not a rigorous multi-plane Fresnel propagation —
+  flagged here so it isn't mistaken for one.
+- **The pupil carries the input beam's own Gaussian illumination** (`gaussian_w_norm`), not
+  uniform amplitude. `trace_fan` deliberately runs the fan out past the useful beam — 2.5 w
+  by default — so that the wavefront is sampled to where there is still light to speak of.
+  Treating that whole disk as *filled* is therefore a 2.5x-too-wide aperture: it reported a
+  spot roughly half its true width, with textbook Airy rings that a clean Gaussian beam
+  simply does not have. Rings do appear once an aperture actually cuts into the beam, which
+  is the physically right behaviour and now comes out of the same code path. Note the factor
+  of two: `I = |E|^2`, so a 1/e^2 *intensity* radius `w` is `exp(-(rho/w)^2)` in amplitude.
+  Because an apodized pupil has no null to quote, `PSFResult` reports a `core_radius_mm`
+  measured off the computed profile (where it first falls to 1/e^2 of its peak) alongside the
+  hard-aperture `airy_first_null_mm` kept as a reference figure.
+- **The azimuthal average reports each annulus at its mean pixel radius**, not at its integer
+  bin index. Binning by `rint(hypot(...))` puts pixels 1.0 and 1.414 pixels from the centre
+  into the same annulus, whose mean radius is 1.21 — so labelling that bin "1" reports a value
+  sampled further out than it claims. On something as sharply peaked as a PSF core that is a
+  several-percent error that grows toward the centre, and it draws as a too-tall, too-narrow
+  spike sitting on the axis with a ripple beside it. The centre bin holds exactly one pixel,
+  so it keeps radius 0 and the true peak; the radius array is simply no longer uniformly
+  spaced.
+- The FFT's pupil phase has to satisfy Nyquist: past a phase step of pi between neighbouring
+  pupil samples the pattern *wraps around silently* and a badly defocused system comes back
+  looking near-diffraction-limited again. `psf_radial_profile` therefore treats its
+  `grid_size` as a minimum, refining the pupil grid as the wavefront steepens, and raising
+  `ValueError` rather than plotting an aliased profile once even `MAX_GRID_SIZE` can't
+  sample it. The *padded* size is held fixed (`MAX_PADDED_SIZE`), so refinement is paid for
+  out of the zero-padding rather than the FFT, and the cost stays flat (~80 ms) at every
+  refinement level instead of reaching ~600 ms — which matters because this sits behind a
+  drag. That is the physically right trade too, not a reluctant one: a steeper wavefront
+  makes a broader pattern, which needs the image plane sampled over a wider span, not more
+  finely. A PSF that can't be computed
+  blanks only its own plot — the Zernike terms and wavefront plot beside it are still valid,
+  so the Ray Tracing tab keeps showing them.
+- `physics/irradiance.py` adds the *other* transverse profile: the geometric irradiance —
+  what you would actually see on a card held at the target. Each ray of a dense fan carries
+  the power of the annulus it stands for (the input beam's Gaussian irradiance at its launch
+  height times `|rho|`), which is accumulated into radial bins and divided by each bin's
+  **annulus area**, not its width. A ray is not a point, so each one is spread over the
+  ray tube it stands for — the target-plane interval reaching halfway to its neighbours on
+  each side — with its power distributed across that tube **in proportion to radius**. That
+  weighting is not a smoothing choice, it is what `dP/dr = I(rho) * rho * drho/dr` does:
+  only the `rho` factor varies appreciably across one tube, and near the axis it varies a
+  lot (the tube at `rho = 2*drho` spans radii differing by 50%). Because tubes tile the
+  radius axis exactly, this is the honest piecewise reconstruction of `dP/dr` rather than a
+  filter over it — no gaps, no invented energy, narrowing to nothing where rays crowd at a
+  caustic, and **exact for a uniformly illuminated fan at any ray count**. It is also
+  erf-free and several times cheaper than the Gaussian kernel it replaced. The tube is
+  mirrored about `r = 0` (radius is a folded coordinate, so a tube near the axis has part of
+  itself on the far side) and normalized per ray, which makes energy conservation structural
+  rather than approximate. What comes out is **irradiance
+  `I(x, 0)`** — power per unit area, what a card shows — returned as a full slice from `-x`
+  through `0` to `+x`, mirrored (exact, by the same rotational symmetry the whole engine
+  rests on). It is deliberately *not* the radial power distribution `2*pi*r*I(r)`: the two
+  differ by exactly that factor, and the second is zero on axis and peaks in a ring even for
+  an ordinary Gaussian spot, so confusing them does not look like a scaling error, it looks
+  like a doughnut. Dividing each bin by its annulus area rather than its width is the single
+  step that separates them. The two profiles are complementary and neither subsumes
+  the other: the diffraction PSF is right at and near best focus, where geometric optics
+  predicts an impossible point; this one is right in the defocused/aberrated regime, where
+  the visible spot is orders of magnitude larger than the diffraction limit and its shape is
+  set purely by where the rays land. The tab shows both, and says so when the geometric spot
+  has shrunk below the diffraction core and stopped being the meaningful one.
+- **The axial ray is the one place the `|rho|` weight is wrong.** Every other ray shares its
+  annulus with its mirror-image partner at `-rho`, so each carries half of
+  `I * 2*pi*rho*drho` — proportional to `I * |rho|`. The axial ray has no partner: it stands
+  for the central *disc* of radius `drho/2`, whose power is `I * pi * (drho/2)^2`, i.e.
+  `I * drho/4` in the same units, **not zero**. "A zero-radius annulus carries no power" is
+  true and is the wrong statement about it. Left at zero, that disc is simply missing and the
+  innermost bin comes out low by roughly `(drho/2 / bin width)^2` — a dimple sitting exactly
+  on the axis of every spot, which is where the eye goes first.
+- **The three models are cross-checked against each other**, not only each against its own
+  closed form (`tests/test_model_agreement.py`). The Gaussian/ABCD model, the geometric ray
+  fan, and the ray-trace -> Zernike -> FFT chain share almost no code, so on a slow, clean
+  system they have to land on the same physical number, and both of the errors above showed
+  up there as several-tens-of-percent disagreements while every module's own tests still
+  passed. The one place they legitimately differ is near focus, where a ray cone grows
+  linearly and a real beam grows as `sqrt(1 + (z/zR)^2)` — that gap is asserted too, rather
+  than papered over, because asserting agreement there would be asserting a bug into place.
+- The Zernike fit and the PSF are both normalized by the radius the *surviving* rays cover,
+  never by the fan's launched half-width. With a stop cutting the bundle down, normalizing
+  by what was launched fits the polynomial over (say) `rho_norm` in `[0, 0.3]` and then
+  extrapolates it out to `1.0` — describing an aperture the light never filled.
+- `SystemConfig.ambient_index` (Config tab -> **General properties**, default `1.0`) feeds
+  *both* this model and the
+  original Gaussian/ABCD one (`physics.system.OpticalSystem`'s `ambient_index` constructor
+  argument, defaulting to `1.0` so every pre-v2.0 caller/test is unaffected) — the two
+  models stay physically consistent about what medium the system sits in.
+
 ## Architecture
 
 ```
@@ -234,6 +399,12 @@ telescope_simulator/
     fit.py        # 2D Nelder-Mead fit of input-beam (z_waist, w0) to
                    # measured data points, for the Fit-to-data tab; reuses
                    # OpticalSystem.propagate() + segment_covering()
+    raytrace.py   # v2.0: real (Snell's-law) geometric ray tracing, one
+                   # meridional fan; RayFanResult/wavefront_at()
+    zernike.py    # v2.0: m=0-only Zernike fit of the wavefront error map
+    diffraction.py  # v2.0: FFT-based diffraction PSF from the fitted wavefront
+    irradiance.py   # v2.0: geometric "what's on the card" transverse intensity,
+                   # the PSF's counterpart away from best focus
   model/          # plain dataclasses + JSON (de)serialization, no physics, no Qt
     optics.py     # Optic, OpticKind, make_default_optic() presets
     beam_spec.py  # InputBeamSpec
@@ -261,8 +432,12 @@ telescope_simulator/
       beam_tab.py      # input beam form + input/output/target characteristics panels
       optics_tab.py    # optics list (one row per optic or composite group),
                         # property form / group summary, EFL readout
-      config_tab.py    # view/aspect/annotation/dark-mode/about settings
+      config_tab.py    # view/aspect/annotation/ray-tracing/dark-mode/about settings
       fit_data_tab.py  # measured (z, diameter) table + "fit input beam" button
+      raytrace_tab.py  # v2.0: the fan's ray count and last-recompute timing, plus
+                        # Zernike/wavefront analysis and both transverse profiles
+                        # (geometric + diffraction) at a pinned target, shown once
+                        # the Config tab's ray-tracing model is enabled
   tests/          # pytest; physics + a few pure-function GUI utilities (color_utils)
 version.py        # hardcoded APP_VERSION/APP_BUILD_DATE/APP_AUTHOR/APP_ORGANISATION,
                    # shown in the Config tab's About section; bump by hand each release
@@ -332,20 +507,54 @@ half-fixed without addressing the whole thing:
 
 - Single wavelength, no dispersion (constant refractive index per optic, no glass
   catalog).
-- Ambient index fixed at 1.0 (air) between/around all optics.
+- Ambient index configurable (Config tab, default `1.0` = air) as of v2.0, but still a
+  single value applied uniformly everywhere between/around all optics — not a per-region
+  medium.
 - Strictly axis-aligned as of v1.2 — there is no transverse offset or tilt anywhere in
   the model (`InputBeamSpec.x_offset` and `Optic.x`/`angle_deg` were removed outright,
   not just hidden). There is intentionally only one `q` per segment (not separate
-  tangential/sagittal), consistent with normal-incidence propagation.
-- No aperture clipping/vignetting — the beam envelope is drawn regardless of whether it
-  exceeds an optic's clear aperture.
+  tangential/sagittal), consistent with normal-incidence propagation. The v2.0
+  ray-tracing model leans on this same fact for its rotational-symmetry simplification
+  (see "Real ray tracing / spherical aberration (v2.0)" above) — reintroducing tilt would
+  require generalizing *both* the Gaussian model (see below) *and* the ray tracer to a
+  full 3D treatment.
+- The Gaussian/ABCD model has no aperture clipping/vignetting — its beam envelope is
+  drawn regardless of whether it exceeds an optic's clear aperture. The v2.0 ray-tracing
+  model *does* clip (a ray outside the clear aperture is vignetted) — this is a
+  deliberate difference between the two models, not an inconsistency to "fix".
 - Positions are global-coordinate: an `Optic.z` is its **front-surface vertex**
   position, not "distance from the previous element."
+- The v2.0 ray-tracing model only ever reports total internal reflection as a ray
+  stop point — it does not trace the reflected path onward.
+- The beam envelope and ray fan are drawn all the way to the canvas edges, in both
+  directions, and re-extend on every pan/zoom. That is not the model running further —
+  each segment's `GaussianBeam` and each `RaySegment`'s line are analytic and exact
+  outside the range a particular `propagate()` bounded them to, exactly as
+  `physics.system.segment_covering` and `RaySegment.opl_at` already rely on. "Reset view"
+  still frames the *physical* extent (`PlotView._plotted_z_range`), not the drawn one, so
+  panning can't make the default view creep outward.
+- A radius of curvature of `0` in either editor means **flat** (stored as `float('inf')`),
+  and the field stays editable while the Flat box is ticked. `physics/matrices.py` and
+  `physics/raytrace.py` still reject a stored `r == 0.0` outright — the GUI translates 0
+  into infinity at the point of entry, so those guards remain as defense against a
+  hand-edited project file, not as the user-facing rule.
+- The Ray Tracing tab's transverse-intensity plot defaults its x range to 1.5x the largest
+  optic's diameter and holds it there, rather than auto-ranging to the data. That is so the
+  spot can be seen growing and shrinking as the target moves; the cost is that a spot far
+  smaller than the aperture is a narrow feature in a wide frame until you zoom in. The
+  diffraction PSF, whose scale is set by the wavelength rather than by any optic, frames its
+  own core instead (`PSFResult.display_radius_mm`) — the computed profile extends far past
+  the visible range in both plots.
+- The geometric profile and the diffraction PSF disagree by a few percent within a couple of
+  Rayleigh ranges of focus, and that is correct, not a defect: a ray cone grows linearly with
+  distance while a real beam grows as `sqrt(1 + (z/zR)^2)`. Each plot carries a caption
+  saying which regime it is the answer in.
 
 If tilt-induced astigmatism is ever reintroduced, expect it to require carrying two `q`
 parameters per segment instead of one — a genuinely bigger change than it sounds, not a
 one-line tweak, since `BeamSegment`/`SystemResult` and every consumer of `.w(z)`
-currently assume a single scalar beam radius.
+currently assume a single scalar beam radius. The same change would also force the v2.0
+ray tracer from a 2D meridional fan to a full 3D skew-ray tracer.
 
 ## Lessons learned (read before touching signal-heavy code)
 
@@ -716,6 +925,174 @@ canvas drag) and EFL/BFL (composed from each member's `thick_lens()` matrix fold
 `thick_lens()` already does internally for one lens, just extended across a chain;
 verified against the independent two-thin-lens combined-focal-length formula, not
 against this app's own matrix code a second time).
+
+### Round 9 (v2.0): real ray tracing, rejecting rayoptics and prysm
+
+`TODO.md`'s v2.0 ask was open-ended: implement real (Snell's-law) ray tracing for
+spherical-aberration analysis, decide whether to build it from scratch or adopt
+`rayoptics`/`prysm`, and sanity-check the whole plan before implementing. The plan was
+worked out and approved before any code was written (see the "Real ray tracing / spherical
+aberration (v2.0)" physics section above for the resulting design) — this entry is about
+the two decisions worth knowing if you touch this later.
+
+**Why not `rayoptics` or `prysm`.** `rayoptics` is a full sequential lens-design tool built
+around its own `OpticalModel`/`SequentialModel` object graph and file format — adopting it
+would mean translating this app's `Optic` list into that model and back on every parameter
+edit, just to reuse geometry math that (per the rotational-symmetry finding) reduces to a
+few lines of 2D trig per surface; it's also this codebase's first non-numpy physics
+dependency, breaking the "physics/ only imports numpy" invariant stated at the top of this
+file. `prysm` is genuinely well-suited to the Zernike-fitting/PSF half of the ask, but
+adopting a second numerical-optics dependency for ~150 lines of code we could write and
+fully test ourselves (a 5-term Zernike basis + `numpy.linalg.lstsq`, one `numpy.fft.fft2`)
+wasn't a good trade once the rotational-symmetry simplification made the "hard part" prysm
+would have solved (general 2D pupil sampling, arbitrary aberration fields) simply not
+present in this app's axis-aligned model. Both were rejected in favor of three small,
+from-scratch modules (`physics/raytrace.py`, `zernike.py`, `diffraction.py`), each
+validated against an independent formula, matching how `optimize.py` and `fit.py` were
+already built.
+
+**A design mistake caught during implementation, not before.** The original plan for
+`physics/zernike.py` considered fabricating synthetic azimuth samples (replicating each
+real ray's radial data point at several made-up angles) so a full 2D Zernike fit could be
+run and "confirm" every non-symmetric term comes back at zero. Implementing it made the
+flaw obvious: manufacturing data we already know the answer for isn't a validation, it's
+just re-asserting the assumption into the input — a fit that can only ever return what you
+told it to return proves nothing. The module was written instead to fit *only* the m=0
+terms directly against the real (rho, OPD) samples from the actual meridional fan (pooling
+the +rho/-rho branches), and the genuine sanity check moved to where it belongs:
+`test_raytrace.py::test_wavefront_is_symmetric_about_the_axis`, which checks that the
+independently-traced +rho and -rho rays actually agree, on real traced data, not fabricated
+data. Lesson: "add fake data so the test/fit output looks complete" is a smell worth
+stopping on even mid-implementation of an already-approved plan — the fix here was a
+same-round self-correction, not a follow-up bug report.
+
+Also worth knowing: `physics/diffraction.py`'s PSF now propagates from the fan's exit plane
+over the measured exit-pupil radius (see the physics section above), but it is still a
+single-plane Fraunhofer transform rather than a rigorous multi-plane Fresnel propagation —
+flagged in that module and above rather than presented as more rigorous than it is.
+
+### Round 10 (v2.0): the v2.0 code review
+
+A twelve-finding review of the v2.0 working tree. Two of the findings are worth recording
+because of the *shape* of the mistake rather than the mistake itself:
+
+- `_intersect_surface` took the nearest forward root of the ray/sphere quadratic. That is
+  right for every `R > 0` surface — and every test in the first cut used one — but a
+  refracting surface is only the *cap* of its sphere containing the vertex, and for `R < 0`
+  that cap is the *far* root: the sphere spans `[vertex - 2|R|, vertex]`, so a ray from
+  further than `2|R|` upstream met the phantom rear hemisphere first. A plano-concave lens
+  then *converged* the beam, with the bend drawn up to `2|R|` in front of the glass. Lesson:
+  when a sign convention admits both signs, a test suite that only ever exercises one of
+  them is not covering the code — the bug sat in the one line that looked most obviously
+  correct.
+- The diffraction PSF aliased silently above ~16 waves of wavefront error, and the existing
+  test for it used ~32 waves — i.e. the test was *itself* past the alias threshold and
+  passed anyway, because the assertion it made (energy further out than the unaberrated
+  case) happened to survive the wraparound. Lesson: a test that passes on aliased data is
+  worse than no test; the replacement asserts on encircled energy inside the first Airy
+  null, which the wraparound cannot fake.
+
+### Round 11 (v2.0): "the results don't quite match what I expect"
+
+Reported as a vague mismatch against intuition on the two transverse-profile plots, which
+turned out to be three separate errors, none of which any existing test could see. All
+three share a shape worth recording: **each was invisible in exactly the case the tests
+covered.**
+
+- **The diffraction pupil was a uniform disk.** `trace_fan` deliberately runs the fan out to
+  `2.5 w` so the wavefront is sampled to where there is still light; the PSF then treated
+  that whole disk as filled. An aperture 2.5x too wide reported a spot about half its true
+  width, with textbook Airy rings a clean Gaussian beam does not have. Every diffraction
+  test passed, because every one of them was a *uniform-aperture* test checked against the
+  Airy formula — they were testing the module against the assumption instead of against the
+  system it was being handed.
+- **The wavefront was referenced to the target plane, not to a reference sphere.** The two
+  agree *exactly* at focus and diverge with defocus (a factor of two too wide by ten
+  Rayleigh ranges out). Every PSF test pinned a target near focus, which is the natural
+  thing to test and the one place the bug cannot show.
+- **"RMS wavefront error" was the Zernike fit residual.** Five m=0 terms describe a smooth
+  traced wavefront almost exactly, so the number was ~1e-8 waves next to a peak-to-valley of
+  25 waves — on screen, permanently, claiming every system was perfect. The test that
+  touched it asserted the residual was near zero, which was true and was the wrong question.
+
+The fix that actually mattered was not any of the three individually, it was
+`tests/test_model_agreement.py`: cross-checking the Gaussian/ABCD model, the geometric ray
+fan and the ray-trace -> Zernike -> FFT chain against *each other* on a system where all
+three must agree. Three implementations sharing almost no code cannot be wrong in the same
+direction by accident, and all three errors showed up there immediately as
+tens-of-percent disagreements. Lesson: when several independent models of the same physics
+exist in one codebase, the agreement between them is the strongest test available, and
+checking each one only against its own closed form leaves exactly the errors that live in
+the seams — the pupil illumination, the reference surface, the meaning of a reported
+number.
+
+A fourth, smaller one from the same round: the geometric profile and the PSF *legitimately*
+disagree by a few percent within a couple of Rayleigh ranges of focus, because a ray cone
+grows linearly and a real beam grows as `sqrt(1 + (z/zR)^2)`. The first version of the
+cross-check asserted they agreed there and failed. Widening the tolerance until it passed
+would have been asserting a bug into place; the test now pins the *size* of the expected
+gap instead, and separately asserts it closes further out.
+
+### Round 12 (v2.0): the artifacts on the axis
+
+Reported as "artifacts in the intensity and PSF plots on axis" — a 15% notch at `x = 0` in
+the geometric profile, and a too-tall spike with ripple beside it in the PSF. Three causes,
+one per plot and one shared:
+
+- **The irradiance kernel spread each ray's power evenly in radius.** It should spread in
+  proportion to radius, because that is what `dP/dr` does across a tube. Spreading evenly
+  shifts a near-axis ray's deposit outward by about `sigma^2/mu`, which is a whole bin for
+  the rays closest to the axis. Replacing the Gaussian with the ray's actual tube, integrated
+  exactly, made the scheme *exact* for a uniform fan and six times faster — the closed-form
+  erf integral had been solving the wrong problem accurately.
+- **The axial ray was given zero power.** It represents a disc, not a zero-radius annulus.
+  See above; this is the error the previous point was partly masking, and vice versa, which
+  is why isolating them needed a parameter sweep over four combinations rather than
+  inspection.
+- **The PSF's azimuthal average labelled each annulus by its integer bin index** rather than
+  by the mean radius of the pixels in it. Bin "1" actually samples 1.21 pixels out.
+
+Two lessons worth keeping. First: **two compensating errors read as one small error.** The
+notch was 15%, but the individual mistakes were −9% and +5% and neither showed cleanly until
+both were varied independently against an analytic answer. A sweep over the cross-product of
+the candidate fixes found it in one run; reasoning about them one at a time did not, and had
+already produced one confidently wrong attribution in an earlier round (the same 15% was
+recorded then as evidence *for* the area weighting, when it was really the missing disc).
+
+Second: **"correct at the origin" is a distinct property worth testing for.** Every one of
+these defects lived in the first bin or two and was invisible in any whole-profile tolerance
+— an `allclose` over 120 bins passes comfortably with one bin 15% out. The regression tests
+added here assert on the innermost bins *specifically*, and against an analytic answer rather
+than against the curve's own smoothness, so that a scheme which is smooth and wrong cannot
+pass.
+
+### Round 13 (v2.0): a composite lens with zero spacing
+
+Reported as "the rays are ending at the interface between the two lens elements". Every ray
+in the fan, the axial one included, came back `vignetted` at the cemented joint — so the
+whole Ray Tracing tab went to "the axial ray does not reach z=…", several steps removed
+from the cause.
+
+The bug was one character of tolerance: `_intersect_surface` filtered forward roots with
+`t > 1e-9`, and with zero spacing the previous element's back surface and the next one's
+front surface are literally the same sphere, so the root is exactly `0`. The guard was
+written to stop a ray re-finding the surface it had just refracted at — a hazard that does
+not exist here, because the trace is strictly sequential and never asks for the same surface
+twice. It was protecting against nothing and breaking the one case where a ray legitimately
+starts on the surface it is about to meet.
+
+Two things worth keeping from it:
+
+- **An epsilon guarding against an impossible case is not free.** It cost nothing for years
+  and then rejected the only geometry that lands exactly on it. Worth asking of any
+  `> eps` in a geometric predicate: what does this exclude, and can that thing actually
+  occur in this code path?
+- **A cemented joint is not an infinitesimal air gap**, even though Snell's law says the two
+  give the same ray direction. The equivalence holds for refraction and breaks for total
+  internal reflection, so the shortcut is invisible until someone builds a fast, high-index
+  doublet — at which point rays stop at a surface that isn't there. The regression test
+  pulls the elements one micron apart to show the spurious TIR coming straight back, so it
+  cannot pass vacuously if a later change simply vignettes everything instead.
 
 ## Testing approach
 

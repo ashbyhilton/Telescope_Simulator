@@ -25,6 +25,17 @@ class SystemConfig:
     x_range_min: Optional[float] = None
     x_range_max: Optional[float] = None
 
+    # Ray-tracing (spherical aberration) model -- v2.0. Off by default; see
+    # physics/raytrace.py. ambient_index also feeds the existing Gaussian/ABCD
+    # model (physics/system.py.OpticalSystem) so both models agree on the
+    # medium between/around optics.
+    raytrace_enabled: bool = False
+    ambient_index: float = 1.0
+    # Rounded up to the next odd number by physics.raytrace.trace_fan, so the
+    # axial (chief) ray -- the reference every other ray's OPD is measured
+    # against -- is always in the fan.
+    raytrace_ray_count: int = 21
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "plot_leading_padding_mm": self.plot_leading_padding_mm,
@@ -39,6 +50,9 @@ class SystemConfig:
             "z_range_max": self.z_range_max,
             "x_range_min": self.x_range_min,
             "x_range_max": self.x_range_max,
+            "raytrace_enabled": self.raytrace_enabled,
+            "ambient_index": self.ambient_index,
+            "raytrace_ray_count": self.raytrace_ray_count,
         }
 
     @classmethod
@@ -56,4 +70,7 @@ class SystemConfig:
             z_range_max=d.get("z_range_max"),
             x_range_min=d.get("x_range_min"),
             x_range_max=d.get("x_range_max"),
+            raytrace_enabled=d.get("raytrace_enabled", False),
+            ambient_index=d.get("ambient_index", 1.0),
+            raytrace_ray_count=d.get("raytrace_ray_count", 21),
         )

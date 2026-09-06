@@ -1,3 +1,4 @@
+import math
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -51,7 +52,12 @@ class _StubAddDialog:
         return self._group
 
 
-def test_typing_zero_into_r1_does_not_stick_with_flat_unchecked(qapp):
+def test_typing_zero_into_r1_makes_the_surface_flat(qapp):
+    """A radius of curvature of zero *means* flat -- it is the number a user
+    reaches for, and it is the one value that has no other sensible meaning
+    (a point has no curvature). Typing it ticks Flat and stores an infinite
+    radius; the field is never disabled, so Flat is a label rather than a
+    mode you have to leave before you can type."""
     tab = OpticsTab()
     optic = make_default_optic(OpticKind.BICONVEX, "Test Lens")
     tab.set_optics([optic])
@@ -60,11 +66,18 @@ def test_typing_zero_into_r1_does_not_stick_with_flat_unchecked(qapp):
     assert not tab.r1_flat_check.isChecked()
     tab.r1_spin.setValue(0.0)
 
-    assert optic.r1 != 0.0
+    assert math.isinf(optic.r1)
+    assert tab.r1_flat_check.isChecked()
+    assert tab.r1_spin.isEnabled()
+
+    # ...and typing a real radius takes it straight back out of flat.
+    tab.r1_spin.setValue(75.0)
+
+    assert optic.r1 == pytest.approx(75.0)
     assert not tab.r1_flat_check.isChecked()
 
 
-def test_typing_zero_into_r2_does_not_stick_with_flat_unchecked(qapp):
+def test_typing_zero_into_r2_makes_the_surface_flat(qapp):
     tab = OpticsTab()
     optic = make_default_optic(OpticKind.BICONVEX, "Test Lens")
     tab.set_optics([optic])
@@ -73,8 +86,34 @@ def test_typing_zero_into_r2_does_not_stick_with_flat_unchecked(qapp):
     assert not tab.r2_flat_check.isChecked()
     tab.r2_spin.setValue(0.0)
 
-    assert optic.r2 != 0.0
+    assert math.isinf(optic.r2)
+    assert tab.r2_flat_check.isChecked()
+    assert tab.r2_spin.isEnabled()
+
+    tab.r2_spin.setValue(75.0)
+
+    # Displayed sign is flipped from the stored physics convention.
+    assert optic.r2 == pytest.approx(-75.0)
     assert not tab.r2_flat_check.isChecked()
+
+
+def test_unticking_flat_snaps_away_from_the_zero_that_means_flat(qapp):
+    """Unticking has to land on *some* non-zero radius, or the box would
+    still read as flat -- the same repair-at-entry pattern beam_tab.py uses
+    for a zero wavefront radius."""
+    tab = OpticsTab()
+    optic = make_default_optic(OpticKind.PLANO_CONVEX, "Test Lens")
+    tab.set_optics([optic])
+    tab.select_optic(optic.id)
+
+    tab.r1_flat_check.setChecked(True)
+    assert math.isinf(optic.r1)
+    assert tab.r1_spin.value() == 0.0
+
+    tab.r1_flat_check.setChecked(False)
+
+    assert tab.r1_spin.value() != 0.0
+    assert not math.isinf(optic.r1)
 
 
 def test_shape_label_tracks_hand_edited_roc_not_stale_kind(qapp):

@@ -130,3 +130,43 @@ def test_lens_preview_uses_high_contrast_colors_on_a_dark_palette(qapp):
         assert dialog.single_page.preview._text_color == (220, 220, 220)
     finally:
         qapp.setPalette(original_palette)
+
+
+def test_zero_radius_of_curvature_means_flat_in_the_dialog_too(qapp):
+    """Same rule as the Optics tab's inline form: 0 *is* flat, the field
+    stays editable, and typing a real radius takes the surface back out of
+    flat. The two editors must agree -- the "Edit lens..." button opens this
+    dialog on the very optic the inline form was just editing."""
+    dialog = AddOpticDialog()  # keep a reference; the page dies with it
+    page = dialog.single_page.fields
+    page.r1_spin.setValue(0.0)
+    page.r2_spin.setValue(40.0)
+
+    r1, r2 = page.current_r1_r2()
+
+    assert math.isinf(r1)
+    assert r2 == pytest.approx(-40.0)  # displayed sign is flipped from storage
+    assert page.r1_flat_check.isChecked()
+    assert not page.r2_flat_check.isChecked()
+    assert page.r1_spin.isEnabled()
+
+    page.r1_spin.setValue(25.0)
+
+    assert page.current_r1_r2()[0] == pytest.approx(25.0)
+    assert not page.r1_flat_check.isChecked()
+
+
+def test_ticking_flat_in_the_dialog_writes_the_zero_that_means_it(qapp):
+    dialog = AddOpticDialog()  # keep a reference; the page dies with it
+    page = dialog.single_page.fields
+    page.r2_spin.setValue(40.0)
+
+    page.r2_flat_check.setChecked(True)
+
+    assert page.r2_spin.value() == 0.0
+    assert math.isinf(page.current_r1_r2()[1])
+
+    page.r2_flat_check.setChecked(False)
+
+    assert page.r2_spin.value() != 0.0
+    assert not math.isinf(page.current_r1_r2()[1])

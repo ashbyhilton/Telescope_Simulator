@@ -239,3 +239,50 @@ def test_clamped_optimize_shows_status_message_without_crashing(qapp):
 
     assert optic.z < neighbor.z
     assert "Optimise for flatness" in w.statusBar().currentMessage()
+
+
+def test_unlocking_the_aspect_ratio_leaves_the_view_where_it_was(qapp):
+    """Unticking "Lock aspect ratio" releases a constraint; it is not a
+    request to re-frame. It used to go through viewRangeChanged, which
+    re-applied the default z/x range and made the canvas jump -- easy to read
+    as the checkbox having changed the model rather than just the view."""
+    w = MainWindow()
+    w.plot_view.setRange(xRange=(-100.0, 900.0), yRange=(-7.0, 7.0), padding=0)
+    before = w.plot_view.getViewBox().viewRange()
+
+    w.config_tab.lock_aspect_check.setChecked(False)
+
+    after = w.plot_view.getViewBox().viewRange()
+    assert w.project.config.lock_aspect_ratio is False
+    assert after[0] == pytest.approx(before[0], abs=1e-6)
+    assert after[1] == pytest.approx(before[1], abs=1e-6)
+    assert w.plot_view.getViewBox().state["aspectLocked"] is False
+
+
+def test_ray_count_moved_to_the_raytrace_tab_still_drives_the_fan_and_the_project(qapp):
+    """The spin box moved tabs; the field did not move out of SystemConfig,
+    so it must still reach the canvas fan and still save with the project."""
+    w = MainWindow()
+    w.project.config.raytrace_enabled = True
+    w.config_tab.set_config(w.project.config)
+    w.on_config_changed(w.project.config)
+    assert not hasattr(w.config_tab, "raytrace_ray_count_spin")
+    assert w.raytrace_tab.ray_count_spin.value() == w.project.config.raytrace_ray_count
+
+    w.raytrace_tab.ray_count_spin.setValue(31)
+
+    assert w.project.config.raytrace_ray_count == 31
+    assert len(w.plot_view._last_ray_fan.paths) == 31
+
+
+def test_refractive_index_sits_in_general_properties_not_under_ray_tracing(qapp):
+    """It feeds the Gaussian/ABCD model and the Optics tab's focal lengths
+    whether or not ray tracing is enabled, so filing it under "Ray tracing"
+    was misleading about its scope."""
+    w = MainWindow()
+    general = w.config_tab._build_general_box.__doc__
+    assert general is not None
+    w.config_tab.ambient_index_spin.setValue(1.33)
+    assert w.project.config.ambient_index == pytest.approx(1.33)
+    # ...and it still works with ray tracing off, which is the point.
+    assert w.project.config.raytrace_enabled is False

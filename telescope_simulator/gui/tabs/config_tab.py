@@ -25,21 +25,47 @@ class ConfigTab(QtWidgets.QWidget):
         self.config = SystemConfig()
 
         layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(self._build_general_box())
         layout.addWidget(self._build_view_box())
         layout.addWidget(self._build_beam_curve_box())
         layout.addWidget(self._build_annotations_box())
+        layout.addWidget(self._build_raytrace_box())
         layout.addWidget(self._build_appearance_box())
         layout.addWidget(self._build_about_box())
 
         note = QtWidgets.QLabel(
-            "Model assumptions: single wavelength, no dispersion, ambient index fixed at "
-            "1.0 (air), strictly axis-aligned (no transverse offset or tilt), "
-            "no aperture-clipping/vignetting."
+            "Model assumptions: single wavelength, no dispersion, strictly axis-aligned "
+            "(no transverse offset or tilt -- the ray-tracing model below assumes rotational "
+            "symmetry on this basis). The Gaussian/ABCD beam model never clips at an "
+            "aperture; the optional ray-tracing model does (vignetting), the Gaussian model "
+            "does not."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #666;")
         layout.addWidget(note)
         layout.addStretch(1)
+
+    # -- general system properties -------------------------------------------
+    def _build_general_box(self) -> QtWidgets.QWidget:
+        """Properties of the system as a whole, independent of which model is
+        doing the propagating. The background index used to sit under "Ray
+        tracing", which misfiled it: it feeds the Gaussian/ABCD model and the
+        Optics tab's focal-length readouts whether or not ray tracing is even
+        enabled."""
+        box = QtWidgets.QGroupBox("General properties")
+        form = QtWidgets.QFormLayout(box)
+
+        self.ambient_index_spin = QtWidgets.QDoubleSpinBox()
+        self.ambient_index_spin.setRange(1.0, 5.0)
+        self.ambient_index_spin.setDecimals(5)
+        self.ambient_index_spin.setSingleStep(0.001)
+        self.ambient_index_spin.setToolTip(
+            "Refractive index of the background medium (default 1.0 = air). Feeds the "
+            "Gaussian beam model, the ray-tracing model, and the Optics tab's focal lengths."
+        )
+        form.addRow("Refractive index of the medium", self.ambient_index_spin)
+        self.ambient_index_spin.valueChanged.connect(self._on_changed)
+        return box
 
     # -- view / aspect ratio -------------------------------------------------
     def _build_view_box(self) -> QtWidgets.QWidget:
@@ -71,8 +97,16 @@ class ConfigTab(QtWidgets.QWidget):
 
         for w in (self.aspect_ratio_spin, self.z_min_spin, self.z_max_spin, self.x_min_spin, self.x_max_spin):
             w.valueChanged.connect(self._on_view_range_changed)
-        for c in (self.lock_aspect_check, self.auto_z_check, self.auto_x_check):
+        for c in (self.auto_z_check, self.auto_x_check):
             c.toggled.connect(self._on_view_range_changed)
+        # Deliberately _on_changed, not _on_view_range_changed: unlocking the
+        # aspect ratio should release the constraint and leave the view
+        # exactly where it is, not re-frame to the default z/x range. Routing
+        # it through viewRangeChanged made unticking this box jump the canvas,
+        # which reads as the checkbox having changed the model. (Re-ticking it
+        # does move the view, but only because the ViewBox then has to satisfy
+        # the ratio again -- that is the constraint, not a reset.)
+        self.lock_aspect_check.toggled.connect(self._on_changed)
 
         return box
 
@@ -111,6 +145,35 @@ class ConfigTab(QtWidgets.QWidget):
         for c in (self.waist_markers_check, self.rayleigh_shading_check):
             c.toggled.connect(self._on_changed)
         return box
+
+    # -- ray tracing (spherical aberration) model, v2.0 -----------------------
+    def _build_raytrace_box(self) -> QtWidgets.QWidget:
+        box = QtWidgets.QGroupBox("Ray tracing (spherical aberration)")
+        form = QtWidgets.QFormLayout(box)
+
+        self.raytrace_enabled_check = QtWidgets.QCheckBox("Enable ray tracing")
+        self.raytrace_enabled_check.setToolTip(
+            "Traces a fan of real rays (Snell's law, real spherical surfaces) through the\n"
+            "same optics, overlaid on the Gaussian beam curve. See the Ray Tracing tab for\n"
+            "the Zernike/wavefront analysis at a pinned target location."
+        )
+        form.addRow(self.raytrace_enabled_check)
+
+        note = QtWidgets.QLabel(
+            "The fan's ray count lives on the Ray Tracing tab, beside the analysis it "
+            "controls and the recompute time it costs. The refractive index of the "
+            "surrounding medium is under General properties, since it applies to the "
+            "Gaussian model too."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666;")
+        form.addRow(note)
+
+        self.raytrace_enabled_check.toggled.connect(self._on_raytrace_enabled_toggled)
+        return box
+
+    def _on_raytrace_enabled_toggled(self, _checked: bool) -> None:
+        self._on_changed()
 
     # -- appearance (app-level, not part of SystemConfig) ----------------------
     def _build_appearance_box(self) -> QtWidgets.QWidget:
@@ -178,6 +241,12 @@ class ConfigTab(QtWidgets.QWidget):
         self.config.beam_curve_points_per_segment = int(self.resolution_spin.value())
         self.config.show_waist_markers = self.waist_markers_check.isChecked()
         self.config.show_rayleigh_shading = self.rayleigh_shading_check.isChecked()
+        self.config.raytrace_enabled = self.raytrace_enabled_check.isChecked()
+        self.config.ambient_index = self.ambient_index_spin.value()
+        # raytrace_ray_count is still a SystemConfig field (still saved with
+        # the project) but is edited on the Ray Tracing tab now, so nothing
+        # here writes it: self.config *is* the project's config object, and
+        # writing a stale local copy back would silently undo that tab's edit.
         self.configChanged.emit(self.config)
 
     def set_config(self, config: SystemConfig) -> None:
@@ -207,6 +276,8 @@ class ConfigTab(QtWidgets.QWidget):
         self.resolution_spin.setValue(config.beam_curve_points_per_segment)
         self.waist_markers_check.setChecked(config.show_waist_markers)
         self.rayleigh_shading_check.setChecked(config.show_rayleigh_shading)
+        self.raytrace_enabled_check.setChecked(config.raytrace_enabled)
+        self.ambient_index_spin.setValue(config.ambient_index)
         self._updating = False
 
     def set_dark_mode(self, enabled: bool) -> None:

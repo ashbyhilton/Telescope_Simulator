@@ -182,6 +182,7 @@ def _optimize(
     target_z: float,
     precision_mm: float,
     objective: Callable[[SystemResult, float], float],
+    ambient_index: float = 1.0,
 ) -> OptimizeResult:
     precision_mm = max(precision_mm, 1e-6)
     governing, reason = find_governing_optic(optics, beam_spec.z_ref, target_z, precision_mm)
@@ -206,7 +207,9 @@ def _optimize(
             trial_optics[i] = replace(sorted_optics[i], z=sorted_optics[i].z + delta)
         trailing = max(target_z - anchor_z - group_span, 0.0) + 1.0
         try:
-            result = OpticalSystem(beam_spec, trial_optics).propagate(trailing_length=trailing)
+            result = OpticalSystem(beam_spec, trial_optics, ambient_index=ambient_index).propagate(
+                trailing_length=trailing
+            )
         except ValueError:
             return float("inf")
         return objective(result, target_z)
@@ -250,15 +253,17 @@ def _optimize(
 
 def optimize_for_flatness(
     beam_spec: InputBeamSpec, optics: List[Optic], target_z: float, precision_mm: float,
+    ambient_index: float = 1.0,
 ) -> OptimizeResult:
     """Move the governing optic's z to minimise the divergence half-angle
     of the beam segment covering target_z."""
-    return _optimize(beam_spec, optics, target_z, precision_mm, _flatness_objective)
+    return _optimize(beam_spec, optics, target_z, precision_mm, _flatness_objective, ambient_index)
 
 
 def optimize_for_focus(
     beam_spec: InputBeamSpec, optics: List[Optic], target_z: float, precision_mm: float,
+    ambient_index: float = 1.0,
 ) -> OptimizeResult:
     """Move the governing optic's z so that segment's next waist lands
     exactly at target_z."""
-    return _optimize(beam_spec, optics, target_z, precision_mm, _focus_objective)
+    return _optimize(beam_spec, optics, target_z, precision_mm, _focus_objective, ambient_index)

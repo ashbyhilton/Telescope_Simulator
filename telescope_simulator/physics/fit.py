@@ -101,12 +101,12 @@ def _nelder_mead_2d(
 
 
 def _residual_sum_sq(beam_spec: InputBeamSpec, optics: List[Optic], points: List[FitDataPoint],
-                      z_waist: float, w0: float) -> float:
+                      z_waist: float, w0: float, ambient_index: float = 1.0) -> float:
     if w0 <= 0.0:
         return float("inf")
     trial_beam = replace(beam_spec, z_ref=z_waist, w_ref=w0, collimated=True, r_ref=None)
     try:
-        result = OpticalSystem(trial_beam, optics).propagate()
+        result = OpticalSystem(trial_beam, optics, ambient_index=ambient_index).propagate()
     except ValueError:
         return float("inf")
     total = 0.0
@@ -125,6 +125,7 @@ def fit_beam_to_data(
     points: List[FitDataPoint],
     max_iter: int = 600,
     tol: float = 1e-14,
+    ambient_index: float = 1.0,
 ) -> FitResult:
     valid = [p for p in points if p.is_valid()]
     if len(valid) < _MIN_VALID_POINTS:
@@ -137,7 +138,7 @@ def fit_beam_to_data(
     z_span = max(max(z_values) - min(z_values), 1.0)
 
     def objective(x: np.ndarray) -> float:
-        return _residual_sum_sq(beam_spec, optics, valid, x[0], x[1])
+        return _residual_sum_sq(beam_spec, optics, valid, x[0], x[1], ambient_index)
 
     # Multi-start: a single simplex run can settle in a local minimum when
     # the search has to cross an optic's "invalid beam" wall to reach the

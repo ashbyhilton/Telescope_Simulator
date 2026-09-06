@@ -28,6 +28,10 @@ class OpticsTab(QtWidgets.QWidget):
         self._selected_id: Optional[int] = None
         self._updating_list = False
         self._updating_form = False
+        # Background medium the EFL/BFL readouts below assume. Owned by
+        # SystemConfig; pushed in by MainWindow (this tab never reads the
+        # project directly, same as every other tab).
+        self._ambient_index = 1.0
 
         self.list_widget = QtWidgets.QListWidget()
         self.list_widget.itemSelectionChanged.connect(self._on_list_selection_changed)
@@ -63,7 +67,8 @@ class OpticsTab(QtWidgets.QWidget):
         self.thickness_spin = mm_spin(0.0, 1000.0)
         roc_tip = (
             "Sign convention: positive = convex, negative = concave (as seen from\n"
-            "outside the lens looking at that surface), for both R1 and R2."
+            "outside the lens looking at that surface), for both R1 and R2.\n"
+            "Zero means a flat surface (an infinite radius of curvature)."
         )
         self.r1_spin = mm_spin(-1.0e7, 1.0e7)
         self.r1_spin.setToolTip(roc_tip)
@@ -286,10 +291,11 @@ class OpticsTab(QtWidgets.QWidget):
         next member, in the same rightmost-applied-first order thick_lens()
         itself already uses internally -- just extended across more than one
         element instead of re-deriving a multi-lens formula."""
-        m = thick_lens(members_sorted[0].thickness_center, members_sorted[0].n, members_sorted[0].r1, members_sorted[0].r2)
+        first = members_sorted[0]
+        m = thick_lens(first.thickness_center, first.n, first.r1, first.r2, self._ambient_index)
         for prev, cur in zip(members_sorted, members_sorted[1:]):
             gap = cur.z - (prev.z + prev.thickness_center)
-            cur_m = thick_lens(cur.thickness_center, cur.n, cur.r1, cur.r2)
+            cur_m = thick_lens(cur.thickness_center, cur.n, cur.r1, cur.r2, self._ambient_index)
             m = cur_m @ propagation(gap) @ m
         return m
 
@@ -334,13 +340,11 @@ class OpticsTab(QtWidgets.QWidget):
         r1_flat = math.isinf(optic.r1)
         self.r1_flat_check.setChecked(r1_flat)
         self.r1_spin.setValue(0.0 if r1_flat else optic.r1)
-        self.r1_spin.setEnabled(not r1_flat)
         r2_flat = math.isinf(optic.r2)
         self.r2_flat_check.setChecked(r2_flat)
         # Displayed with sign flipped from the stored physics-convention
         # value, so positive reads as convex here too (see r2_spin's tooltip).
         self.r2_spin.setValue(0.0 if r2_flat else -optic.r2)
-        self.r2_spin.setEnabled(not r2_flat)
         self.n_spin.setValue(optic.n)
         self.z_spin.setValue(optic.z)
         self.lock_z_check.setChecked(optic.lock_z)
@@ -351,9 +355,22 @@ class OpticsTab(QtWidgets.QWidget):
     def _update_shape_label(self, optic: Optic) -> None:
         self.shape_label.setText(describe_shape(optic.r1, optic.r2))
 
+    def set_ambient_index(self, ambient_index: float) -> None:
+        """Set the background medium the focal-length readouts assume, and
+        redraw whichever of them is currently on screen."""
+        if ambient_index == self._ambient_index:
+            return
+        self._ambient_index = ambient_index
+        # Same single-optic / rigid-group dispatch as _load_selection().
+        members = self._members_for_key(self._selected_id)
+        if len(members) == 1 and members[0].group_id is None:
+            self._update_efl_label(members[0])
+        elif members:
+            self._update_group_efl_bfl_labels(sorted(members, key=lambda o: o.z))
+
     def _update_efl_label(self, optic: Optic) -> None:
         try:
-            m = thick_lens(optic.thickness_center, optic.n, optic.r1, optic.r2)
+            m = thick_lens(optic.thickness_center, optic.n, optic.r1, optic.r2, self._ambient_index)
         except (ValueError, ZeroDivisionError):
             self.efl_label.setText("-")
             self.bfl_label.setText("-")
@@ -374,17 +391,51 @@ class OpticsTab(QtWidgets.QWidget):
         # has real thickness.
         return format_length_mm(1.0 / power), format_length_mm(-m[0, 0] / m[1, 0])
 
+    # A radius of curvature of zero *means* flat, in both directions: typing
+    # 0 into the field ticks "Flat", and typing any non-zero value unticks
+    # it. So the field is never disabled -- an infinite radius has no number
+    # to show, but 0 is exactly the number the user reaches for, and greying
+    # the box out made "Flat" feel like a mode you had to leave before you
+    # could type. The checkbox stays as a one-click shortcut and as the
+    # readable label for what 0 means.
     def _on_r1_flat_toggled(self, checked: bool) -> None:
-        self.r1_spin.setEnabled(not checked)
-        if not checked and self.r1_spin.value() == 0.0:
-            self.r1_spin.setValue(100.0)
+        self._sync_flat_checkbox(self.r1_spin, checked)
         self._on_form_value_changed()
 
     def _on_r2_flat_toggled(self, checked: bool) -> None:
-        self.r2_spin.setEnabled(not checked)
-        if not checked and self.r2_spin.value() == 0.0:
-            self.r2_spin.setValue(100.0)
+        self._sync_flat_checkbox(self.r2_spin, checked)
         self._on_form_value_changed()
+
+    def _apply_flat_from_value(self, spin: QtWidgets.QDoubleSpinBox,
+                               check: QtWidgets.QCheckBox) -> bool:
+        """Make the Flat checkbox reflect the spin box's current value, and
+        report whether this surface is flat. Guarded so the checkbox's own
+        toggled signal doesn't re-enter the form handler mid-write."""
+        flat = spin.value() == 0.0
+        if check.isChecked() != flat:
+            was_updating = self._updating_form
+            self._updating_form = True
+            check.setChecked(flat)
+            self._updating_form = was_updating
+        return flat
+
+    def _sync_flat_checkbox(self, spin: QtWidgets.QDoubleSpinBox, checked: bool) -> None:
+        """Bring the spin box in line with a *user* toggle of its Flat box.
+        Ticking means 0; unticking needs some non-zero radius to mean
+        anything, so it snaps to one -- the same "repair the degenerate
+        value at the point of entry" pattern beam_tab.py uses for r_ref."""
+        # Save/restore rather than assign: _load_optic_into_form() sets the
+        # checkboxes while it is *already* inside the guard, and blindly
+        # clearing it here would let the rest of that load re-enter
+        # _on_form_value_changed and write half-populated form values back
+        # onto the optic.
+        was_updating = self._updating_form
+        self._updating_form = True
+        if checked:
+            spin.setValue(0.0)
+        elif spin.value() == 0.0:
+            spin.setValue(100.0)
+        self._updating_form = was_updating
 
     def _on_form_value_changed(self, *_args) -> None:
         if self._updating_form or self._selected_id is None:
@@ -393,24 +444,15 @@ class OpticsTab(QtWidgets.QWidget):
         if len(members) != 1 or members[0].group_id is not None:
             return
         optic = members[0]
-        # A user can type 0 directly into a ROC spinbox without touching its
-        # "Flat" checkbox, bypassing the repair the checkbox's own toggled
-        # handler does. Apply the same repair here so optic.r1/r2 can never
-        # become 0.0 while "Flat" is unchecked, regardless of entry path.
-        # setValue() re-enters this handler (same as the toggled handlers
-        # already do), which finishes the write with the repaired value.
-        if not self.r1_flat_check.isChecked() and self.r1_spin.value() == 0.0:
-            self.r1_spin.setValue(100.0)
-            return
-        if not self.r2_flat_check.isChecked() and self.r2_spin.value() == 0.0:
-            self.r2_spin.setValue(100.0)
-            return
-        self.r1_spin.setEnabled(not self.r1_flat_check.isChecked())
-        self.r2_spin.setEnabled(not self.r2_flat_check.isChecked())
+        # 0 is the value that *means* flat, so the spin box is the authority
+        # and the checkbox follows it -- typing 0 ticks Flat, typing anything
+        # else unticks it, whichever way the value was entered.
+        r1_flat = self._apply_flat_from_value(self.r1_spin, self.r1_flat_check)
+        r2_flat = self._apply_flat_from_value(self.r2_spin, self.r2_flat_check)
         optic.diameter_full = self.diameter_spin.value()
         optic.thickness_center = self.thickness_spin.value()
-        optic.r1 = float("inf") if self.r1_flat_check.isChecked() else self.r1_spin.value()
-        optic.r2 = float("inf") if self.r2_flat_check.isChecked() else -self.r2_spin.value()
+        optic.r1 = float("inf") if r1_flat else self.r1_spin.value()
+        optic.r2 = float("inf") if r2_flat else -self.r2_spin.value()
         optic.n = self.n_spin.value()
         optic.z = self.z_spin.value()
         optic.lock_z = self.lock_z_check.isChecked()

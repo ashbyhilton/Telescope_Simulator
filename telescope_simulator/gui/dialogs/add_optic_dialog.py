@@ -22,6 +22,7 @@ from ...model.optics import (
     surface_sag,
 )
 from ..lens_geometry import build_lens_polygon
+from ..mm_axis import MMAxisItem
 from ..widget_utils import mm_spin, wrap_row
 
 
@@ -95,11 +96,9 @@ class _OpticFieldsWidget(QtWidgets.QWidget):
         r1_flat = math.isinf(optic.r1)
         self.r1_flat_check.setChecked(r1_flat)
         self.r1_spin.setValue(0.0 if r1_flat else optic.r1)
-        self.r1_spin.setEnabled(not r1_flat)
         r2_flat = math.isinf(optic.r2)
         self.r2_flat_check.setChecked(r2_flat)
         self.r2_spin.setValue(0.0 if r2_flat else -optic.r2)
-        self.r2_spin.setEnabled(not r2_flat)
         self.n_spin.setValue(optic.n)
         self._updating = False
         self._sync_edge_from_center()
@@ -114,20 +113,41 @@ class _OpticFieldsWidget(QtWidgets.QWidget):
         optic.n = self.n_spin.value()
 
     def current_r1_r2(self):
-        r1 = float("inf") if self.r1_flat_check.isChecked() else self.r1_spin.value()
-        r2 = float("inf") if self.r2_flat_check.isChecked() else -self.r2_spin.value()
+        # 0 *is* flat, so the spin box is the authority and the checkbox only
+        # labels it -- same rule as the Optics tab's inline form.
+        r1 = float("inf") if self.r1_spin.value() == 0.0 else self.r1_spin.value()
+        r2 = float("inf") if self.r2_spin.value() == 0.0 else -self.r2_spin.value()
         return r1, r2
 
     def _on_flat_toggled(self, _checked: bool) -> None:
-        self.r1_spin.setEnabled(not self.r1_flat_check.isChecked())
-        self.r2_spin.setEnabled(not self.r2_flat_check.isChecked())
+        """A *user* toggle of either Flat box, translated into the value that
+        means it. Ticking means 0; unticking needs some non-zero radius to
+        mean anything, so it snaps to one."""
+        if self._updating:
+            return
+        self._updating = True
+        for spin, check in ((self.r1_spin, self.r1_flat_check), (self.r2_spin, self.r2_flat_check)):
+            if check.isChecked():
+                spin.setValue(0.0)
+            elif spin.value() == 0.0:
+                spin.setValue(100.0)
+        self._updating = False
         self._on_shape_field_changed()
 
     def _on_shape_field_changed(self, *_args) -> None:
         if self._updating:
             return
+        self._sync_flat_checks_from_values()
         self._sync_edge_from_center()
         self.changed.emit()
+
+    def _sync_flat_checks_from_values(self) -> None:
+        """Keep each Flat box showing what its value already means, whichever
+        way that value was entered."""
+        self._updating = True
+        self.r1_flat_check.setChecked(self.r1_spin.value() == 0.0)
+        self.r2_flat_check.setChecked(self.r2_spin.value() == 0.0)
+        self._updating = False
 
     def _on_center_thickness_changed(self, _value: float) -> None:
         if self._updating:
@@ -166,7 +186,17 @@ class _LensPreview(pg.PlotWidget):
     both radii of curvature."""
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        # Same unit-aware axes as the main canvas: a thin lens previewed on
+        # its own spans a fraction of a millimeter in z, and pyqtgraph's own
+        # SI prefixing would label that "mmm" (it prepends a prefix to the
+        # declared unit string without knowing "mm" is already non-base).
+        super().__init__(
+            parent,
+            axisItems={
+                "bottom": MMAxisItem(orientation="bottom", base_text="z"),
+                "left": MMAxisItem(orientation="left", base_text="x"),
+            },
+        )
         # pg.PlotWidget's background follows the app-wide QPalette when not
         # explicitly set (see theme.py's apply_theme(), which sets that
         # palette globally but only ever restyles the *main* canvas's
@@ -195,8 +225,6 @@ class _LensPreview(pg.PlotWidget):
             axis.setTextPen(axis_pen)
 
         self.showGrid(x=True, y=True, alpha=0.15)
-        self.setLabel("bottom", "z", units="mm")
-        self.setLabel("left", "x", units="mm")
         self.getViewBox().setAspectLocked(True)
         self._shape_items: List[QtWidgets.QGraphicsPolygonItem] = []
         self._dim_lines: List[pg.PlotDataItem] = []

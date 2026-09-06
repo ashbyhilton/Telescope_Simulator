@@ -1,3 +1,238 @@
+For v2.0:
+- [x] Major change: Implement a ray tracing physics engine to allow for understanding and working with spherical aberation. This engine should be accessed through a tick box in config that is default off. When enabled, it should use the existing input beam properties as a base to construct a number of rays which are propogated through the optical system using Snell's law at each intersection with an optical element. For each ray intersection with an interface, find the local surface normal to calculate incident angle, and using the refractive indices of the two materials (add a new config box for the refractive index of the background medium, default to air) calculate the angle of refraction, and thus the new ray. Consider Rays that escape the optical system before the final lens should end at the z location of the optic they fail to intersect. Consider also where total internal reflection may occur within an optic. Consider whether to implement this model structure from scratch or utilise existing packages such as 'rayoptics'. The calculated rays should be plotted on the graphic screen overlaid ontop of the existing gaussian model, and should update as lens parameters or input beam parameters vary, as for the gaussian model. when a target location is set by clicking (as before), compare each ray's accumulated optical path length to a reference to get the wavefront error map across the pupil at that plane. Fit that map to Zernike polynomials using a standard least-squares fit over the sampled ray fan, and provide the polynomial coefficients along with easy to understand descriptions of each term. consider whether it is possible to plot a transverse intensity profile from this information, either by weighing each ray with the intensity of original input beam, or otherwise. Consider whether to implement this from scratch or utilise existing packages (?prysm?). Sanity check my plan, and identify gaps or better alternatives. Build a detailed plan to implement this major change along the pathway that is the best candidate, along with modifications to the user interface, and be ready to implement if I approve of the plan.
+  [Sanity-checked and planned, then implemented from scratch (rejected both
+  rayoptics and prysm -- see README "Round 9" for the full reasoning). Key
+  finding that shaped everything else: this app is strictly axis-aligned
+  with no tilt/decenter (v1.2), so the whole problem is rotationally
+  symmetric -- a single 2D meridional ray fan (physics/raytrace.py) fully
+  characterizes the system, only the m=0 "spherical" Zernike terms
+  (physics/zernike.py) can ever be non-zero, and the diffraction PSF
+  (physics/diffraction.py) is exactly a revolution of a 1D radial profile.
+  TIR terminates the ray (no reflected-path modeling, confirmed with user);
+  a ray missing an optic's clear aperture is vignetted and stops at that
+  optic's z, per spec. New Config-tab "Ray tracing" box (enable checkbox,
+  background-medium index -- now also feeding the existing Gaussian/ABCD
+  model, confirmed with user -- and ray-fan count); ray fan overlaid live on
+  the canvas (PlotView._update_ray_trace); new "Ray Tracing" tab shows
+  Zernike coefficients + descriptions, RMS/PV wavefront error, W(rho), and
+  the diffraction PSF radial profile whenever a target is pinned, following
+  the existing "MainWindow owns the trigger logic" convention. All three new
+  physics modules validated against independent formulas (thick-lens ABCD
+  back focal length in the paraxial limit, a known Zernike boundary-value
+  identity, the Airy first-null formula) -- see tests/test_raytrace.py,
+  test_zernike.py, test_diffraction.py.]
+- [x] Code review of the v2.0 working tree (12 findings), all addressed.
+  [Correctness: (1) _intersect_surface took the nearest forward root, which
+  picks the phantom rear hemisphere for every R < 0 surface -- a
+  plano-concave lens converged the beam and refracted up to 2|R| in front of
+  the glass; now selects the vertex-side cap. (2) the diffraction FFT
+  aliased silently above ~16 waves, so an off-focus target plotted a
+  wrapped, deceptively diffraction-limited PSF -- psf_radial_profile now
+  refines the pupil grid to satisfy Nyquist and refuses (ValueError) rather
+  than plotting an aliased profile. (3) the Zernike normalization and PSF
+  pupil used the *launched* fan half-width even when a stop had vignetted
+  most rays, extrapolating a fit made over rho_norm in [0, 0.3] out to 1.0;
+  both now use the surviving bundle. (4) the Fraunhofer propagation ran from
+  the beam's launch plane over the launched fan radius -- a plane upstream
+  of every optic -- giving an Airy null several times wrong; now runs from
+  the fan's exit plane over the measured exit-pupil radius. (5) a
+  zero-thickness optic marked every ray including the axial one vignetted,
+  reported as "the axial ray does not reach z=..."; now named at the source,
+  and wavefront_at's message says which surface stopped the ray and how.
+  (6) a Gaussian-propagation failure returned before refreshing the Ray
+  Tracing tab, leaving stale Zernike/PSF numbers on screen. (7) r_ref == 0.0
+  from a hand-edited project file raised an uncatchable ZeroDivisionError.
+  (8) the FFT input pixel pitch used 2R/n where linspace gives 2R/(n-1).
+  Quality: (9) dragging an optic cost ~120 ms/mouse-move (~8 fps) because
+  PlotView.refresh() re-emits the pinned target and so ran the PSF on every
+  move -- the tab's recompute is now coalesced onto a single-shot timer,
+  measured 5.1 ms/step (~194 fps) with one recompute when the drag settles.
+  (10) SystemConfig.ambient_index never reached the Optics tab's EFL/BFL
+  readouts or the canvas hover overlay, so those two panels contradicted the
+  rest of the app in a non-air medium. (11) the PSF profile took a single
+  FFT row while its docstring claimed an azimuthal average; now genuinely
+  averages the annulus. (12) dead ray_count == 1 branch removed, and the
+  documented odd-ray-count invariant is now enforced in trace_fan rather
+  than only in the spin box's step size. 16 new tests; suite 124 -> 140.
+  See README "Round 10" for the two findings worth remembering.]
+- [x] In addition to the diffraction PSF, plot the actual transverse intensity as would be seen by eye on a card.
+  [new physics/irradiance.py + a second plot in the Ray Tracing tab. Each
+  ray of a dense (801-ray, independent of the Config fan count) meridional
+  fan carries the power of the annulus it stands for -- the input beam's
+  Gaussian irradiance at its launch height times |rho| -- binned radially
+  and divided by each bin's *annulus area*, not its width (dividing by width
+  would make every profile falsely rise toward its outer edge). Weighting by
+  |rho| also makes the axial ray weightless, which is correct and removes
+  any rho = 0 singularity. This is the honest counterpart to the PSF rather
+  than a replacement: the two are valid in opposite regimes, so the tab shows
+  both, and adds a caveat when the geometric spot has dropped below the Airy
+  radius and stopped being the meaningful one. Verified against the input
+  beam's own closed-form Gaussian for the no-optics case.]
+- [x] A radius of curvature of 0 should be accepted and mean 'flat'; the field should not gray out, and a non-zero value should clear 'flat'.
+  [the spin box is now the authority and the Flat checkbox follows it, in
+  both editors (Optics tab form and the Add/Edit-optic dialog) -- typing 0
+  ticks Flat and stores float('inf'), typing anything else unticks it, and
+  the field is never disabled. Ticking Flat writes 0; unticking snaps to a
+  non-zero radius, since otherwise the value would still read as flat. This
+  reverses the previous rule (0 was repaired *away* to 100mm), so the two
+  tests that encoded that rule were rewritten rather than deleted. Found
+  while doing it: _sync_flat_checkbox cleared the _updating_form guard its
+  caller was already inside, letting _load_optic_into_form write
+  half-populated form values back onto the optic -- now saves/restores.]
+- [x] Continue the beam and rays to the edges of the plot window rather than truncating at the Rayleigh-range padding.
+  [PlotView now tracks the drawn span separately from the physical one and
+  extends both curves to the window in both directions, re-extending on
+  pan/zoom via sigXRangeChanged (cheap: it re-samples the cached result,
+  it does not re-run the physics). Rays extrapolate back before the launch
+  plane too; a vignetted/TIR ray still stops where the physics stops it,
+  since that endpoint is real rather than a drawing limit. "Reset view"
+  deliberately keeps framing the physical extent, or each pan would widen
+  what reset restores. beam_at() gained the first/last-segment fallback so a
+  target can be pinned out in the newly-drawn region.]
+- [x] Changing the target plane should take a single left click, without unclicking the previous marker first.
+  [dropped _on_scene_mouse_clicked's "already pinned" early return, which
+  made every retarget a two-click job. Clicking the marker still unpins --
+  that path accepts the event before it reaches the scene handler, so it
+  can't re-pin on the same click. Added an explicit left-button check, which
+  matters more now that clicks are consequential while pinned.]
+- [x] Widen the left panel so no horizontal scroll is needed.
+  [tab panel 360-460px -> 520-680px, plus the Ray Tracing tab's scroll area
+  set to vertical-only and its Zernike table told to wrap the Description
+  column into whatever width is left rather than demand its natural width
+  (that table was what forced the sideways scroll).]
+- [x] Add descriptive text under the diffraction PSF and wavefront error plots, like the transverse intensity one has.
+  [all four captions now go through a shared RaytraceTab._note() helper.
+  Each plot answers a different question about the same target and which to
+  believe depends on the regime, so none is self-explanatory from its axes.]
+- [x] Give the rays a spatial width in the transverse intensity plot to smooth its discrete appearance, conserving total energy.
+  [Gaussian of the ray's own tube width (half the target-plane spacing to
+  its neighbours in the fan), integrated over each bin in closed form and
+  normalized per ray. Two things had to be got right, both caught by the
+  existing analytic-Gaussian test rather than by inspection: spreading power
+  evenly in *radius* rather than in area pushed irradiance ~15% too high in
+  the innermost bin, and point-sampling the kernel at bin centres is
+  inaccurate whenever the tube is narrower than a bin -- which is the normal
+  case -- in a way that does not cancel against the normalization. Kernel is
+  mirrored about r=0 since radius is a folded coordinate. Because the
+  smoothing scales with ray density, the fan needed for a smooth curve came
+  *down* from 801 rays to 401.]
+- [x] Put the PSF plot on a log vertical axis.
+  [an Airy pattern's first ring is ~1.7% of peak and the second ~0.4%, so on
+  a linear axis everything past the core sat on the baseline -- exactly the
+  part worth reading when judging how much light an aberration threw out of
+  the core. Intensities are clamped to 1e-7 before plotting, since a
+  Fraunhofer pattern has exact zeros at its nulls and log10(0) draws as a
+  gap running off the bottom of the axis.]
+- [x] Unticking "lock aspect ratio" should leave the x and z ranges where they were.
+  [the checkbox went through viewRangeChanged, which re-applied the *default*
+  z/x range. Removing that was only half of it: a ViewBox keeps the range it
+  was asked for alongside the wider one the lock makes it show, and dropping
+  the lock snaps back to the request -- so PlotView.set_aspect_locked() now
+  re-asserts what was actually on screen. "Unlock" means stop constraining,
+  not re-frame.]
+- [x] Move "refractive index of the medium" out of Ray tracing into a general properties area of Config.
+  [it feeds the Gaussian/ABCD model and the Optics tab's focal lengths
+  whether or not ray tracing is enabled, so filing it under Ray tracing
+  misdescribed its scope. New "General properties" group, first in the tab.]
+- [x] Move "number of rays" from Config to the Ray Tracing tab.
+  [still a SystemConfig field, so it still saves and loads with the project;
+  it is now edited beside the analysis it controls and the recompute time it
+  costs. ConfigTab deliberately no longer writes that field -- its
+  self.config *is* the project's config object, so writing a stale local
+  copy back would silently undo the other tab's edit.]
+- [x] Show the time taken to compute the previous frame in the Ray Tracing tab.
+  [total plus a per-stage breakdown, which is the useful half: it shows that
+  raising the ray count costs almost nothing (~2 ms) while the PSF is
+  ~110-120 ms and is what the debounce exists for.]
+- [x] Check the spatial units in plot labels -- "mmm" should read "um" etc.
+  [the Ray Tracing tab's three plots and the Add-optic dialog's preview were
+  using plain pyqtgraph units="mm" axes; pyqtgraph prepends an SI prefix
+  without knowing "mm" is already non-base. All four now use the app's own
+  MMAxisItem, which the main canvas has had since v1.1.]
+- [x] Plot the transverse intensity as a full slice I(x, 0) rather than I(r), and check the normalisation.
+  [normalisation was already correct -- it divides each bin by its annulus
+  area, so what it returns is irradiance, not the 2*pi*r-weighted radial
+  power distribution; verified against the analytic Gaussian and, now, against
+  the ABCD model's w(z) at five planes either side of focus. What was wrong
+  was the presentation: it showed only the r >= 0 half at bin *outer edges*.
+  Now bin centres, mirrored to a signed x axis, with a default range of 1.5x
+  the largest optic's diameter so the spot visibly grows and shrinks as the
+  target moves instead of being rescaled to fill the frame.]
+- [x] Remove the log axis from the PSF and plot it against x rather than r.
+  [reverses the entry above it, and correctly so: once the pupil carried the
+  beam's real Gaussian illumination the rings largely went away, and there
+  was nothing left down at 1e-4 of peak for a log axis to reveal. Mirrored to
+  a signed x like the plot above it so the two read against each other, and
+  framed on the core -- the FFT's own radius array runs ~100x further, which
+  on a linear axis draws the whole pattern as one spike at the origin.]
+- [x] Double-check the physics of both transverse-intensity calculations.
+  [three real errors, all invisible in exactly the case the existing tests
+  covered -- see README "Round 11" for the full write-up.
+   1. The diffraction pupil was a uniform disk, but trace_fan runs the fan
+      out to 2.5 w. That is an aperture 2.5x too wide: it reported a spot
+      about half its true width, with Airy rings a Gaussian beam does not
+      have. Every diffraction test was a uniform-aperture test checked
+      against the Airy formula, i.e. testing the module against the
+      assumption instead of against the system it was handed.
+   2. The wavefront was referenced to the target *plane*, not to a reference
+      sphere centred on the target point. Those agree exactly at focus and
+      diverge with defocus -- a factor of two too wide by ten Rayleigh
+      ranges out -- and every PSF test pinned a target near focus.
+   3. "RMS wavefront error" was the Zernike fit *residual*: ~1e-8 waves next
+      to a peak-to-valley of 25 waves, permanently claiming every system was
+      perfect. Now the area-weighted RMS of the wavefront with piston
+      removed; the residual is still shown, under its own name.
+  The fix that mattered was tests/test_model_agreement.py, which cross-checks
+  the Gaussian/ABCD model, the geometric ray fan and the ray-trace -> Zernike
+  -> FFT chain against each other. All three errors showed up there at once
+  as tens-of-percent disagreements. The card profile itself needed no physics
+  change -- it now agrees with the ABCD model to ~1% from 200 mm out to 2 m.]
+- [x] Artifacts on axis in the transverse-intensity and PSF plots.
+  [three causes, one per plot and one shared -- see README "Round 12".
+   1. The irradiance kernel spread each ray's power evenly in radius. It
+      should spread in proportion to radius, since that is what dP/dr does
+      across a tube; spreading evenly shifts a near-axis ray's deposit
+      outward by ~sigma^2/mu, a whole bin for the innermost rays. Replaced
+      the Gaussian with the ray's actual tube integrated exactly: now exact
+      for a uniform fan at any ray count, and ~6x faster (no erf).
+   2. The axial ray was weighted as a zero-radius annulus, i.e. zero power.
+      It has no mirror partner to share an annulus with -- it stands for the
+      central disc of radius drho/2, worth I*drho/4 in the same units. The
+      missing disc is a dimple exactly on axis.
+   3. The PSF's azimuthal average labelled each annulus by its integer bin
+      index, but rint() binning puts pixels at 1.0 and 1.414 in the same
+      annulus, whose mean radius is 1.21. Now reported at the mean radius of
+      the pixels that contributed.
+  Innermost bins went from -15% to within 0.02% of the analytic Gaussian,
+  the PSF core from a 6% wobble to 0.4%, and the card got faster (19-36 ms
+  -> 8-25 ms). Errors 1 and 2 partly cancelled, which is why an earlier round
+  recorded that same 15% as evidence *for* the even-in-radius weighting; a
+  sweep over all four combinations separated them in one run.]
+- [x] A composite lens with zero spacing between elements: rays end at the interface.
+  [_intersect_surface filtered forward roots with t > 1e-9. With zero
+  spacing the previous element's back surface and the next one's front
+  surface are the *same sphere*, so the root is exactly 0 and every ray in
+  the fan -- the axial one included -- came back vignetted at the joint,
+  which surfaced as "the axial ray does not reach z=..." several steps from
+  the cause. The guard was there to stop a ray re-finding the surface it
+  had just refracted at, which cannot happen: the trace is strictly
+  sequential (front, back, next front) and never asks for the same surface
+  twice. Now t >= 0, with a picometre of slack for float noise.
+  Fixed alongside it: a zero gap is a cemented joint, not a sliver of air,
+  so the back surface now refracts straight into the next glass. Snell
+  composes, so the direction is identical either way -- but the detour
+  through the ambient index can total-internally-reflect at an angle a real
+  cemented joint passes easily (44 deg on the joint is past the 32.7 deg
+  glass-air critical angle and nowhere near the 76.7 deg glass-glass one),
+  stopping the ray at a surface that does not physically exist. The ABCD
+  model composes this correctly already and has no TIR, which is why only
+  the ray tracer was visibly broken. Doublet focus now agrees with the
+  paraxial model to 1e-3.]
+- [ ]
+
+
+
+
 FIXES FOR v1.2
 - [x] Improve contrast on the text in the add lens window graphic. In dark mode it is very faint.
   [root cause: the Add-optic dialog's preview widget (a fresh pg.PlotWidget
@@ -136,7 +371,7 @@ For v1.0:
   narrower than the search precision — see README "Round 5".
 - [fixed] duplicate sort of the optics list in `_optimize()` — see README "Round 5".
 
-Current version: v1.2
+Current version: v2.0
 
 TODO:
 - [fixed] in the view tab, changing the view parameters should automatically update the plot and not require an 'update' button

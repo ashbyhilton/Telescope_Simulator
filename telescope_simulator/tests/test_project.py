@@ -35,3 +35,29 @@ def test_user_clearing_all_rows_is_respected_not_reset_to_defaults():
     restored = Project.from_dict(project.to_dict())
 
     assert restored.fit_data_points == []
+
+
+def test_round_trip_includes_v2_raytrace_config_fields():
+    project = default_demo_project()
+    project.config.raytrace_enabled = True
+    project.config.ambient_index = 1.33
+    project.config.raytrace_ray_count = 15
+
+    restored = Project.from_dict(project.to_dict())
+
+    assert restored.config.raytrace_enabled is True
+    assert restored.config.ambient_index == 1.33
+    assert restored.config.raytrace_ray_count == 15
+
+
+def test_old_save_file_without_raytrace_keys_defaults_to_disabled_air():
+    project = default_demo_project()
+    d = project.to_dict()
+    for key in ("raytrace_enabled", "ambient_index", "raytrace_ray_count"):
+        del d["config"][key]  # simulate a save file from before v2.0
+
+    restored = Project.from_dict(d)
+
+    assert restored.config.raytrace_enabled is False
+    assert restored.config.ambient_index == 1.0
+    assert restored.config.raytrace_ray_count == 21

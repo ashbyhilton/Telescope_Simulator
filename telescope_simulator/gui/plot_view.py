@@ -16,6 +16,7 @@ from ..model.optics import describe_shape, edge_thickness_from_center, group_key
 from ..model.project import Project
 from ..physics.beam import GaussianBeam
 from ..physics.matrices import thick_lens
+from ..physics.raytrace import RayFanResult, trace_fan
 from ..physics.system import OpticalSystem, SystemResult
 from .color_utils import wavelength_to_rgb
 from .mm_axis import MMAxisItem, format_length_mm
@@ -64,6 +65,14 @@ class PlotView(pg.PlotWidget):
         self._fit_labels: List[pg.TextItem] = []
         self._fit_data_points: List[FitDataPoint] = []
 
+        self._ray_fan_curve = pg.PlotCurveItem(pen=pg.mkPen((235, 130, 20), width=1))
+        self.addItem(self._ray_fan_curve)
+        self._ray_stop_markers = pg.ScatterPlotItem(
+            size=7, symbol="x", brush=None, pen=pg.mkPen((210, 30, 30, 230), width=1.5),
+        )
+        self.addItem(self._ray_stop_markers)
+        self._last_ray_fan: Optional[RayFanResult] = None
+
         self._optic_items: Dict[int, OpticItem] = {}
         self._hover_overlay = pg.TextItem(
             anchor=(0.0, 1.0), color=(20, 20, 20), fill=(255, 255, 230, 230), border=(120, 120, 90),
@@ -76,7 +85,11 @@ class PlotView(pg.PlotWidget):
         self.project: Optional[Project] = None
 
         self._last_result: Optional[SystemResult] = None
+        # The physically-derived span (input padding .. output Rayleigh
+        # padding). Still what "reset view" frames; no longer what the curves
+        # are drawn over -- see _draw_z_range().
         self._plotted_z_range: Optional[Tuple[float, float]] = None
+        self._drawn_z_range: Optional[Tuple[float, float]] = None
         self._plotted_w_abs_max: float = 1.0
         self._pinned = False
         self._pinned_z: Optional[float] = None
@@ -85,12 +98,34 @@ class PlotView(pg.PlotWidget):
 
         self.scene().sigMouseMoved.connect(self._on_scene_mouse_moved)
         self.scene().sigMouseClicked.connect(self._on_scene_mouse_clicked)
+        # Panning or zooming exposes z the curves weren't drawn over, so the
+        # beam and rays are re-extended to fill the new window. Safe against
+        # recursion: this only ever calls setData, never setRange, and the
+        # view box has auto-ranging disabled.
+        self.getViewBox().sigXRangeChanged.connect(self._on_x_range_changed)
 
     # -- project wiring -----------------------------------------------
+    def set_aspect_locked(self, locked: bool, ratio: float) -> None:
+        """Apply the aspect lock without moving the view when releasing it.
+
+        A ViewBox keeps the range it was *asked* for alongside the wider one
+        the aspect lock makes it actually show, and dropping the lock snaps
+        straight back to the request -- so unticking the box jumped the
+        canvas to whatever range predated the constraint, which reads as the
+        checkbox having changed something about the system rather than about
+        the view. Re-asserting what was on screen keeps "unlock" meaning only
+        "stop constraining"."""
+        vb = self.getViewBox()
+        was_locked = bool(vb.state.get("aspectLocked"))
+        (z_lo, z_hi), (x_lo, x_hi) = vb.viewRange()
+        vb.setAspectLocked(locked, ratio=ratio)
+        if was_locked and not locked:
+            self.setRange(xRange=(z_lo, z_hi), yRange=(x_lo, x_hi), padding=0)
+
     def set_project(self, project: Project) -> None:
         self.project = project
         self._unpin()
-        self.getViewBox().setAspectLocked(project.config.lock_aspect_ratio, ratio=project.config.aspect_ratio)
+        self.set_aspect_locked(project.config.lock_aspect_ratio, project.config.aspect_ratio)
         self._sync_optic_items()
         self.refresh()
         self.apply_default_view()
@@ -167,8 +202,7 @@ class PlotView(pg.PlotWidget):
     def _on_item_hover_leave(self, item: OpticItem) -> None:
         self._hover_overlay.hide()
 
-    @staticmethod
-    def _hover_text(optic) -> str:
+    def _hover_text(self, optic) -> str:
         lines = [optic.name, describe_shape(optic.r1, optic.r2)]
         if optic.group_name:
             lines.insert(0, f"[{optic.group_name}]")
@@ -181,7 +215,11 @@ class PlotView(pg.PlotWidget):
         lines.append(f"R1: {r1_text}   R2: {r2_text}")
         lines.append(f"n: {optic.n:.4g}")
         try:
-            m = thick_lens(optic.thickness_center, optic.n, optic.r1, optic.r2)
+            # In the project's background medium, not unconditionally in air
+            # -- otherwise this overlay contradicts the Optics tab's own EFL
+            # readout for the same lens whenever the medium isn't air.
+            ambient = self.project.config.ambient_index if self.project is not None else 1.0
+            m = thick_lens(optic.thickness_center, optic.n, optic.r1, optic.r2, ambient)
             power = -m[1, 0]
             efl_text = "∞" if abs(power) < 1e-12 else format_length_mm(1.0 / power)
         except (ValueError, ZeroDivisionError):
@@ -204,7 +242,17 @@ class PlotView(pg.PlotWidget):
         self.targetChanged.emit(TargetInfo(z=z, beam=beam, label=label, pinned=False))
 
     def _on_scene_mouse_clicked(self, ev) -> None:
-        if ev.isAccepted() or self._pinned or self.project is None:
+        # No `self._pinned` guard: a left click moves the target to wherever
+        # it lands, whether or not one is already pinned. Requiring the old
+        # marker to be cleared first made every retarget a two-click job for
+        # no benefit. Clicking the marker itself still unpins -- that path
+        # accepts the event before it reaches here, so it can't re-pin in the
+        # same click. The button check matters more now that clicks are
+        # consequential even when pinned: a right click is pyqtgraph's
+        # context menu, not a retarget.
+        if ev.isAccepted() or self.project is None:
+            return
+        if ev.button() != QtCore.Qt.MouseButton.LeftButton:
             return
         vb = self.getViewBox()
         scene_pos = ev.scenePos()
@@ -248,15 +296,26 @@ class PlotView(pg.PlotWidget):
 
     def beam_at(self, z: float) -> Optional[Tuple[GaussianBeam, str, float]]:
         """Returns (beam, segment label, clamped z) for whichever segment
-        covers `z`, clamped to the currently plotted z-range."""
-        if self._last_result is None or self._plotted_z_range is None:
+        covers `z`, clamped to the range the beam is currently drawn over.
+
+        Beyond the ends of propagate()'s segment list, the first/last
+        segment's beam is still exact (it's an analytic GaussianBeam, not a
+        sampled curve), so a target pinned out in the extended part of the
+        canvas is answered from it -- the same out-of-window extrapolation
+        physics.system.segment_covering already documents. Without that, a
+        click on visibly-drawn beam out past the last segment would silently
+        do nothing."""
+        if self._last_result is None:
             return None
-        z_lo, z_hi = self._plotted_z_range
+        z_lo, z_hi = self._drawn_z_range or self._plotted_z_range or (z, z)
         z = min(max(z, z_lo), z_hi)
-        for seg in self._last_result.segments:
+        segments = self._last_result.segments
+        for seg in segments:
             if seg.z_start - 1e-9 <= z <= seg.z_end + 1e-9:
                 return seg.beam, seg.label, z
-        return None
+        if z < segments[0].z_start:
+            return segments[0].beam, segments[0].label, z
+        return segments[-1].beam, segments[-1].label, z
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -294,13 +353,19 @@ class PlotView(pg.PlotWidget):
             return
         try:
             trailing = self._trailing_length()
-            result = OpticalSystem(self.project.beam, self.project.optics).propagate(trailing_length=trailing)
+            result = OpticalSystem(
+                self.project.beam, self.project.optics, ambient_index=self.project.config.ambient_index,
+            ).propagate(trailing_length=trailing)
         except ValueError:
             return
         self._last_result = result
 
-        z_all, w_all = self._sample_result(result)
-        self._plotted_z_range = (float(z_all[0]), float(z_all[-1]))
+        # The physical span first (it frames "reset view" and is what the
+        # window range gets compared against), then the wider span actually
+        # drawn.
+        self._plotted_z_range = self._physical_z_range(result)
+        self._drawn_z_range = self._draw_z_range()
+        z_all, w_all = self._sample_result(result, *self._drawn_z_range)
         self._plotted_w_abs_max = float(np.max(w_all)) if len(w_all) else 1.0
 
         cfg = self.project.config
@@ -321,6 +386,7 @@ class PlotView(pg.PlotWidget):
             self._waist_markers.setData([], [])
         self._update_rayleigh_shading(waists if cfg.show_rayleigh_shading else [])
         self.set_fit_data_points(self.project.fit_data_points)
+        self._update_ray_trace(cfg)
 
         if self._pinned and self._pinned_z is not None:
             # A pinned target snapshots a specific GaussianBeam at pin time;
@@ -345,19 +411,64 @@ class PlotView(pg.PlotWidget):
 
     def _trailing_length(self) -> float:
         cfg = self.project.config
-        probe = OpticalSystem(self.project.beam, self.project.optics).propagate()
+        probe = OpticalSystem(
+            self.project.beam, self.project.optics, ambient_index=cfg.ambient_index,
+        ).propagate()
         zr = probe.output_rayleigh_range
         return max(cfg.plot_trailing_padding_zr_multiple * zr, cfg.plot_trailing_padding_min_mm)
 
-    def _sample_result(self, result: SystemResult):
+    def _physical_z_range(self, result: SystemResult) -> Tuple[float, float]:
+        """The span the beam is *physically* described over: the configured
+        leading padding before the input plane, out to the end of
+        propagate()'s trailing segment."""
+        cfg = self.project.config
+        lead = min(self.project.beam.z_ref - cfg.plot_leading_padding_mm, result.segments[0].z_start)
+        return (float(lead), float(result.segments[-1].z_end))
+
+    def _draw_z_range(self) -> Tuple[float, float]:
+        """The span the curves are drawn over: the current window, widened to
+        at least the physical span.
+
+        A beam that stops in mid-air partway across the canvas reads as the
+        beam ending there, which it doesn't -- every segment's GaussianBeam
+        (and every RaySegment's line) is analytic and exact outside the
+        window a particular propagate() happened to bound it to, exactly as
+        physics.system.segment_covering and RaySegment.opl_at already rely
+        on. So the picture is extended to the frame instead of the frame
+        being fitted to the picture."""
+        lo, hi = self._plotted_z_range or (0.0, 1.0)
+        try:
+            view_lo, view_hi = self.getViewBox().viewRange()[0]
+        except Exception:
+            return (lo, hi)
+        if not (math.isfinite(view_lo) and math.isfinite(view_hi)) or view_hi <= view_lo:
+            return (lo, hi)
+        return (min(lo, float(view_lo)), max(hi, float(view_hi)))
+
+    def _on_x_range_changed(self, *_args) -> None:
+        """Re-extend the drawn curves after a pan/zoom, without re-running
+        the physics: the beam and ray results are unchanged by moving the
+        window, only the range they need to cover is."""
+        if self.project is None or self._last_result is None:
+            return
+        new_range = self._draw_z_range()
+        if self._drawn_z_range is not None and new_range == self._drawn_z_range:
+            return
+        self._drawn_z_range = new_range
+        z_all, w_all = self._sample_result(self._last_result, *new_range)
+        self._beam_upper.setData(z_all, w_all)
+        self._beam_lower.setData(z_all, -w_all)
+        self._axis_line.setData([z_all[0], z_all[-1]], [0.0, 0.0])
+        self._draw_ray_fan(*new_range)
+
+    def _sample_result(self, result: SystemResult, z_lo: float, z_hi: float):
         cfg = self.project.config
         n_pts = max(cfg.beam_curve_points_per_segment, 2)
         zs, ws = [], []
 
-        lead_start = self.project.beam.z_ref - cfg.plot_leading_padding_mm
         first_seg = result.segments[0]
-        if lead_start < first_seg.z_start:
-            z_lead = np.linspace(lead_start, first_seg.z_start, n_pts)
+        if z_lo < first_seg.z_start:
+            z_lead = np.linspace(z_lo, first_seg.z_start, n_pts)
             zs.append(z_lead)
             ws.append(first_seg.beam.w(z_lead))
 
@@ -365,6 +476,12 @@ class PlotView(pg.PlotWidget):
             z_seg = np.linspace(seg.z_start, seg.z_end, n_pts)
             zs.append(z_seg)
             ws.append(seg.beam.w(z_seg))
+
+        last_seg = result.segments[-1]
+        if z_hi > last_seg.z_end:
+            z_tail = np.linspace(last_seg.z_end, z_hi, n_pts)
+            zs.append(z_tail)
+            ws.append(last_seg.beam.w(z_tail))
         return np.concatenate(zs), np.concatenate(ws)
 
     def _find_waists(self, result: SystemResult):
@@ -374,6 +491,81 @@ class PlotView(pg.PlotWidget):
             if seg.z_start - 1e-9 <= zw <= seg.z_end + 1e-9:
                 pts.append((zw, seg.beam.rayleigh_range))
         return pts
+
+    def _update_ray_trace(self, cfg) -> None:
+        """Overlays the real (Snell's-law) ray fan on top of the Gaussian
+        beam curve when enabled -- see physics/raytrace.py. Each ray is
+        drawn as its own polyline; NaN-separated so pyqtgraph draws them as
+        disjoint segments within one PlotCurveItem instead of connecting one
+        ray's endpoint to the next ray's start. A surviving ray's trailing
+        leg is clipped to the currently plotted z range (its own physics.py
+        RaySegment stays exact/unbounded; only the drawing is truncated,
+        same relationship the Gaussian curve already has to its own
+        underlying beam segments)."""
+        if not cfg.raytrace_enabled or self.project is None or self._drawn_z_range is None:
+            self._last_ray_fan = None
+            self._ray_fan_curve.setData([], [])
+            self._ray_stop_markers.setData([], [])
+            return
+
+        # Defensive, per README's "Lessons learned": this is a display-only
+        # addition sitting inside refresh(), *before* the pinned-target
+        # re-emit and the final scene()/viewport() update calls below -- an
+        # unguarded failure here (e.g. a transient r1/r2 == 0.0 mid-edit,
+        # same bug shape as Round 1/Round 8) would silently abort the rest
+        # of refresh() every time it's called from then on, freezing the
+        # whole canvas (not just the ray overlay) without the app ever
+        # crashing. Never let this block anything after it.
+        try:
+            fan = trace_fan(
+                self.project.beam, self.project.optics,
+                ambient_index=cfg.ambient_index, ray_count=cfg.raytrace_ray_count,
+            )
+        except ValueError:
+            self._last_ray_fan = None
+            self._ray_fan_curve.setData([], [])
+            self._ray_stop_markers.setData([], [])
+            return
+        self._last_ray_fan = fan
+        self._draw_ray_fan(*self._drawn_z_range)
+
+    def _draw_ray_fan(self, z_lo: float, z_hi: float) -> None:
+        """Build the ray polylines over [z_lo, z_hi] from the cached fan.
+
+        Both ends are extrapolated to the window: a surviving ray's trailing
+        leg out to z_hi, and its incoming leg back to z_lo (the launch
+        direction is a straight line before the input plane just as much as
+        after it). A vignetted/TIR ray still stops where the physics stops
+        it -- that endpoint is real, not a drawing limit."""
+        fan = self._last_ray_fan
+        if fan is None:
+            self._ray_fan_curve.setData([], [])
+            self._ray_stop_markers.setData([], [])
+            return
+
+        zs: List[float] = []
+        rs: List[float] = []
+        stop_zs: List[float] = []
+        stop_rs: List[float] = []
+        for path in fan.paths:
+            for i, seg in enumerate(path.segments[:-1]):
+                start_z = min(seg.z0, z_lo) if i == 0 else seg.z0
+                zs.extend([start_z, seg.z1, float("nan")])
+                rs.extend([seg.r_at(start_z), seg.r1, float("nan")])
+            last = path.segments[-1]
+            start_z = min(last.z0, z_lo) if len(path.segments) == 1 else last.z0
+            # A surviving ray's trailing RaySegment runs to a nominal
+            # +1e7 mm, so this clips it down to the window rather than
+            # extending it -- the window is the shorter of the two either way.
+            end_z = min(last.z1, z_hi) if path.status == "ok" else last.z1
+            zs.extend([start_z, end_z, float("nan")])
+            rs.extend([last.r_at(start_z), last.r_at(end_z) if path.status == "ok" else last.r1, float("nan")])
+            if path.status != "ok":
+                stop_zs.append(last.z1)
+                stop_rs.append(last.r1)
+
+        self._ray_fan_curve.setData(zs, rs, connect="finite")
+        self._ray_stop_markers.setData(stop_zs, stop_rs)
 
     def set_fit_data_points(self, points: List[FitDataPoint]) -> None:
         """Draws two small circle markers (z, ±diameter/2) per valid

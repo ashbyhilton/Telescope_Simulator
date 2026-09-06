@@ -111,3 +111,119 @@ def test_group_drag_moves_every_member_by_the_same_delta(qapp):
     assert follower.z == pytest.approx(follower_z_before + 40.0)
     assert follower.z - lead.z == pytest.approx(separation_before)
     assert view._optic_items[follower.id].pos().x() == pytest.approx(follower.z)
+
+
+def _finite_span(xs):
+    finite = [x for x in xs if x == x and abs(x) != float("inf")]
+    return min(finite), max(finite)
+
+
+def test_beam_is_drawn_to_the_window_edges_not_to_its_own_padding(qapp):
+    """A beam curve that stops in mid-canvas reads as the beam ending there,
+    which it doesn't -- each segment's GaussianBeam is analytic well outside
+    the range a particular propagate() bounded it to. The drawn span follows
+    the window, in both directions."""
+    project = default_demo_project()
+    view = PlotView()
+    view.set_project(project)
+
+    view.setXRange(-900.0, 1800.0, padding=0)
+
+    z = view._beam_upper.getData()[0]
+    assert z.min() == pytest.approx(-900.0, abs=1.0)
+    assert z.max() == pytest.approx(1800.0, abs=1.0)
+    # The axis line has to keep up too, or it stops short of its own beam.
+    axis_z = view._axis_line.getData()[0]
+    assert axis_z[0] == pytest.approx(-900.0, abs=1.0)
+    assert axis_z[-1] == pytest.approx(1800.0, abs=1.0)
+
+
+def test_rays_are_drawn_to_the_window_edges_in_both_directions(qapp):
+    project = default_demo_project()
+    project.config.raytrace_enabled = True
+    view = PlotView()
+    view.set_project(project)
+
+    view.setXRange(-700.0, 1400.0, padding=0)
+
+    ray_z, _ = view._ray_fan_curve.getData()
+    lo, hi = _finite_span(ray_z)
+    assert lo == pytest.approx(-700.0, abs=1.0)  # extrapolated back before the launch plane
+    assert hi == pytest.approx(1400.0, abs=1.0)
+
+
+def test_extending_the_view_does_not_move_the_reset_view_range(qapp):
+    """The drawn span follows the window, but "reset view" must keep framing
+    the *physical* extent -- otherwise each pan would widen the range that
+    reset restores, and the view would creep outward every time."""
+    project = default_demo_project()
+    view = PlotView()
+    view.set_project(project)
+    physical_before = view._plotted_z_range
+
+    view.setXRange(-5000.0, 9000.0, padding=0)
+
+    assert view._plotted_z_range == physical_before
+
+
+def test_a_vignetted_ray_still_stops_where_the_physics_stops_it(qapp):
+    """Extending rays to the window must not extend the ones that were
+    blocked -- a vignetting stop point is a real physical endpoint, not a
+    drawing limit."""
+    project = default_demo_project()
+    project.config.raytrace_enabled = True
+    # A stop *downstream* of the first optic. Shrinking the first one instead
+    # would vignette nothing: trace_fan sizes the fan to the first optic's
+    # clear aperture, so the fan would simply shrink with it.
+    last = max(project.optics, key=lambda o: o.z)
+    project.optics.append(Optic(
+        name="Stop", diameter_full=0.2, thickness_center=1.0,
+        r1=float("inf"), r2=float("inf"), n=1.5,
+        z=last.z + last.thickness_center + 20.0,
+    ))
+    view = PlotView()
+    view.set_project(project)
+    view.setXRange(-500.0, 1200.0, padding=0)
+
+    stop_z, _ = view._ray_stop_markers.getData()
+    assert len(stop_z) > 0
+    assert max(stop_z) < 1200.0
+
+
+def test_target_can_be_pinned_out_in_the_extended_part_of_the_canvas(qapp):
+    # The beam is drawn out there, so a click out there has to answer with a
+    # beam rather than silently doing nothing.
+    project = default_demo_project()
+    view = PlotView()
+    view.set_project(project)
+    view.setXRange(-100.0, 2500.0, padding=0)
+
+    found = view.beam_at(2000.0)
+
+    assert found is not None
+    beam, _label, z = found
+    assert z == pytest.approx(2000.0)
+    assert beam.w(z) > 0.0
+
+
+def test_clicking_again_retargets_without_unpinning_first(qapp):
+    """Retargeting used to be a two-click job: _on_scene_mouse_clicked bailed
+    out whenever a target was already pinned, so the old marker had to be
+    cleared before a new one could be placed."""
+    project = default_demo_project()
+    view = PlotView()
+    view.set_project(project)
+    emitted = []
+    view.targetChanged.connect(emitted.append)
+    view.setXRange(-100.0, 600.0, padding=0)  # so both targets are on drawn beam
+
+    beam, label, z1 = view.beam_at(200.0)
+    view._pin_at(z1, beam, label)
+    beam, label, z2 = view.beam_at(260.0)
+    view._pin_at(z2, beam, label)
+
+    assert view._pinned is True
+    assert view._pinned_z == pytest.approx(z2)
+    assert emitted[-1].pinned is True
+    assert emitted[-1].z == pytest.approx(z2)
+    assert z2 != pytest.approx(z1)
